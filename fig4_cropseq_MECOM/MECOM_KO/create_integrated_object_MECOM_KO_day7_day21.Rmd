@@ -1,0 +1,689 @@
+---
+title: "Create integrated object MECOM KO"
+author: "Marina Nikolova"
+date: "016/05/2023"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+library(ggrepel)
+library(uwot)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+show_col(c(c("#1F618D","#2874A6"),
+                     colorRampPalette(c("#0a4a3d","#138D75","#73C6B6"))(5),
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B","#876e08"))(5),
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(4), 
+                     c("#BFC9CA","#566573","#273746")))
+
+```
+
+Load data
+```{r load matrices and metadata}
+
+# Experiment 1 day 7
+# A2_day7 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20221114_P2179_MARINA_MECOM_KO_day_7_and_SC_detected_gRNA/processed/A2/outs/filtered_feature_bc_matrix/"), project = "A2_day7", min.cells = 3, min.features = 200)
+B1_17_1_day7 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20221114_P2179_MARINA_MECOM_KO_day_7_and_SC_detected_gRNA/processed/B1_17/outs/filtered_feature_bc_matrix/"), project = "B1_17_1_day7", min.cells = 3, min.features = 200)
+D2_22_1_day7 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20221114_P2179_MARINA_MECOM_KO_day_7_and_SC_detected_gRNA/processed/D2_22/outs/filtered_feature_bc_matrix/"), project = "D2_22_1_day7", min.cells = 3, min.features = 200)
+# G8_1_1_day7 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20221114_P2179_MARINA_MECOM_KO_day_7_and_SC_detected_gRNA/processed/G8_1/outs/filtered_feature_bc_matrix/"), project = "G8_1_1_day7", min.cells = 3, min.features = 200)
+# Experiment 2 day 7
+B1_17_2_day7 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230303_P2306_MARINA_MECOM_KO_BVO_day_7_experiment_2/processed/d7_B1_17/outs/filtered_feature_bc_matrix/"), project = "B1_17_2_day7", min.cells = 3, min.features = 200)
+D2_22_2_day7 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230303_P2306_MARINA_MECOM_KO_BVO_day_7_experiment_2/processed/d7_D2_22/outs/filtered_feature_bc_matrix/"), project = "D2_22_2_day7", min.cells = 3, min.features = 200)
+wt_1_day7 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230303_P2306_MARINA_MECOM_KO_BVO_day_7_experiment_2/processed/d7_wt_1/outs/filtered_feature_bc_matrix/"), project = "wt_1_day7", min.cells = 3, min.features = 200)
+wt_2_day7 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230303_P2306_MARINA_MECOM_KO_BVO_day_7_experiment_2/processed/d7_wt_2/outs/filtered_feature_bc_matrix/"), project = "wt_2_day7", min.cells = 3, min.features = 200)
+# Experiment 3 day 21
+B1_17_1_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230308_P2323_FIDES_ASHLEY_MARINA/processed_MN/B1_17_1_d21/outs/filtered_feature_bc_matrix/"), project = "B1_17_1_day21", min.cells = 3, min.features = 200)
+wt_1_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230308_P2323_FIDES_ASHLEY_MARINA/processed_MN/wt1_d21/outs/filtered_feature_bc_matrix/"), project = "wt_1_day21", min.cells = 3, min.features = 200)
+# wt_2_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230308_P2323_FIDES_ASHLEY_MARINA/processed_MN/wt2_d21/outs/filtered_feature_bc_matrix/"), project = "wt_2_day21", min.cells = 3, min.features = 200)
+# Experiment 4 day 21
+B1_17_2_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230314_P2331_MARINA_MECOM_KO_experiment_2/processed/B1_17_2_d21/outs/filtered_feature_bc_matrix/"), project = "B1_17_2_day21", min.cells = 3, min.features = 200)
+D2_22_1_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230314_P2331_MARINA_MECOM_KO_experiment_2/processed/D2_22_1_d21/outs/filtered_feature_bc_matrix/"), project = "D2_22_1_day21", min.cells = 3, min.features = 200)
+D2_22_2_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230314_P2331_MARINA_MECOM_KO_experiment_2/processed/D2_22_2_d21/outs/filtered_feature_bc_matrix/"), project = "D2_22_2_day21", min.cells = 3, min.features = 200)
+D2_22_3_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230314_P2331_MARINA_MECOM_KO_experiment_2/processed/D2_22_3_d21/outs/filtered_feature_bc_matrix/"), project = "D2_22_3_day21", min.cells = 3, min.features = 200)
+# G8_1_1_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230314_P2331_MARINA_MECOM_KO_experiment_2/processed/G8_1_d21/outs/filtered_feature_bc_matrix/"), project = "G8_1_1_day21", min.cells = 3, min.features = 200)
+wt_3_day21 <- CreateSeuratObject(counts =Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230314_P2331_MARINA_MECOM_KO_experiment_2/processed/wt3_d21/outs/filtered_feature_bc_matrix/"), project = "wt_3_day21", min.cells = 3, min.features = 200)
+wt_4_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230314_P2331_MARINA_MECOM_KO_experiment_2/processed/wt4_d21/outs/filtered_feature_bc_matrix/"), project = "wt_4_day21", min.cells = 3, min.features = 200)
+
+# Experiment 5 day 21
+wt_2_day21 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230412_P2364_MARINA_MECOM_KO_and_diabetic_BVOs/processed/wt2_d21/outs/filtered_feature_bc_matrix/"), project = "wt_2_day21", min.cells = 3, min.features = 200)
+
+
+```
+
+Create a Seurat object
+```{r create Seurat object}
+
+merged <- merge(B1_17_1_day7, list(D2_22_1_day7, 
+                              B1_17_2_day7, 
+                              D2_22_2_day7, 
+                              wt_1_day7, 
+                              wt_2_day7, 
+                              B1_17_1_day21, 
+                              wt_1_day21, 
+                              B1_17_2_day21, 
+                              D2_22_1_day21, 
+                              D2_22_2_day21, 
+                              D2_22_3_day21, 
+                              wt_3_day21, 
+                              wt_4_day21, 
+                              wt_2_day21,
+                              #A2_day7, G8_1_1_day7, G8_1_1_day21
+                              ))
+merged <- PercentageFeatureSet(merged, "^MT-", col.name = "percent.mt")
+
+```
+
+# QC
+```{r check quality pre-subsetting}
+
+# reorder the samples in the metadata to appear in the order desired by us
+mecom_ko_levels <- factor(c("wt_1_day7", "wt_2_day7", #"A2_day7", 
+                            "B1_17_1_day7", "B1_17_2_day7", "D2_22_1_day7", "D2_22_2_day7", #"G8_1_1_day7", 
+                            "wt_1_day21", "wt_2_day21", "wt_3_day21", "wt_4_day21", "B1_17_1_day21", "B1_17_2_day21", "D2_22_1_day21", "D2_22_2_day21", "D2_22_3_day21" #, "G8_1_1_day21"
+                            ))
+merged$orig.ident <- factor(merged$orig.ident, levels = mecom_ko_levels)
+Idents(merged) <- "orig.ident"
+# generate color palette based on vintage_cols palette
+col_sample <-setNames(c(c("#F39229", "#F07F27", #"#ED6D26", 
+                          "#E9C92E", "#D5C62A", "#42B8AE", "#3EB3BD", #"#7378B7", 
+                          "#EA5D27", "#E5512C", "#E04432", "#DC3838", "#CBC528", "#A8C130", "#3EADC8", "#3EA7D2", "#489CD3" #, "#8966A9"
+                          )), mecom_ko_levels)
+
+pdf("Plots/nFeature_pre-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = col_sample, pt.size=0)
+dev.off()
+
+pdf("Plots/nCount_pre-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = col_sample, pt.size=0)
+dev.off()
+
+pdf("Plots/percent.mt_pre-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = col_sample, pt.size=0)
+dev.off()
+
+```
+
+
+```{r subset low quality cells}
+
+merged <- subset(merged, subset = percent.mt < 25 & nFeature_RNA > 1000)
+
+                       # ((orig.ident == c("wt_1_day21", "B1_17_2_day21", "D2_22_1_day21", "D2_22_2_day21") &
+                       # nFeature_RNA > 800) |
+                       # (orig.ident == c("wt_2_day7", "B1_17_2_day7", "D2_22_2_day7", "wt_3_day21", "wt_4_day21", "B1_17_1_day21", "D2_22_3_day21", "G8_1_1_day21") &
+                       # nFeature_RNA > 1000) |
+                       # (orig.ident == c("wt_1_day7", "A2_day7", "wt_2_day21") &
+                       # nFeature_RNA > 1400) |
+                       # (orig.ident == c("B1_17_1_day7", "D2_22_1_day7", "G8_1_1_day7") &
+                       # nFeature_RNA > 2000)))
+
+```
+
+```{r check quality post-subsetting}
+
+pdf("Plots/nFeature_post-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = col_sample, pt.size=0)
+dev.off()
+
+pdf("Plots/nCount_post-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = col_sample, pt.size=0)
+dev.off()
+
+pdf("Plots/percent.mt_post-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = col_sample, pt.size=0)
+dev.off()
+
+```
+
+```{r preprocess and integrate}
+
+merged <- NormalizeData(merged) %>% CellCycleScoring(g2m.features=cc.genes.updated.2019$g2m.genes, s.features=cc.genes.updated.2019$s.genes) %>% FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(merged) <- setdiff(VariableFeatures(merged), c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(merged), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1]))
+
+merged <- ScaleData(merged, vars.to.regress = c("percent.mt", "nFeature_RNA", "nCount_RNA")) %>%
+  RunPCA(npcs=30, verbose=F) %>%
+  RunUMAP(dims=1:20)
+
+seurat <- cluster_sim_spectrum(merged, label_tag="orig.ident", cluster_resolution=1) %>%
+  run_PCA(reduction="css", npcs=20, reduction.name="csspca", reduction.key="CSSPCA_") %>%
+  RunUMAP(reduction="csspca", dims=1:20, reduction.name="umap_css", reduction.key="UMAPCSS_", seed = 40)
+
+# Add identities
+seurat$timepoint <- seurat$orig.ident
+# seurat$timepoint <- gsub(c("A2_day7"), "day7", seurat$timepoint)
+seurat$timepoint <- gsub(c("wt_1_day7"), "day7", seurat$timepoint)
+seurat$timepoint <- gsub(c("wt_2_day7"), "day7", seurat$timepoint)
+seurat$timepoint <- gsub(c("B1_17_1_day7"), "day7", seurat$timepoint)
+seurat$timepoint <- gsub(c("B1_17_2_day7"), "day7", seurat$timepoint)
+seurat$timepoint <- gsub(c("D2_22_1_day7"), "day7", seurat$timepoint)
+seurat$timepoint <- gsub(c("D2_22_2_day7"), "day7", seurat$timepoint)
+# seurat$timepoint <- gsub(c("G8_1_1_day7"), "day7", seurat$timepoint)
+seurat$timepoint <- gsub(c("wt_1_day21"), "day21", seurat$timepoint)
+seurat$timepoint <- gsub(c("wt_2_day21"), "day21", seurat$timepoint)
+seurat$timepoint <- gsub(c("wt_3_day21"), "day21", seurat$timepoint)
+seurat$timepoint <- gsub(c("wt_4_day21"), "day21", seurat$timepoint)
+seurat$timepoint <- gsub(c("B1_17_1_day21"), "day21", seurat$timepoint)
+seurat$timepoint <- gsub(c("B1_17_2_day21"), "day21", seurat$timepoint)
+seurat$timepoint <- gsub(c("D2_22_1_day21"), "day21", seurat$timepoint)
+seurat$timepoint <- gsub(c("D2_22_2_day21"), "day21", seurat$timepoint)
+seurat$timepoint <- gsub(c("D2_22_3_day21"), "day21", seurat$timepoint)
+# seurat$timepoint <- gsub(c("G8_1_1_day21"), "day21", seurat$timepoint)
+
+seurat$condition <- seurat$orig.ident
+seurat$condition <- gsub(c("wt_1_day7"), "WT", seurat$condition)
+seurat$condition <- gsub(c("wt_2_day7"), "WT", seurat$condition)
+seurat$condition <- gsub(c("B1_17_1_day7"), "KO", seurat$condition)
+seurat$condition <- gsub(c("B1_17_2_day7"), "KO", seurat$condition)
+seurat$condition <- gsub(c("D2_22_1_day7"), "KO", seurat$condition)
+seurat$condition <- gsub(c("D2_22_2_day7"), "KO", seurat$condition)
+seurat$condition <- gsub(c("wt_1_day21"), "WT", seurat$condition)
+seurat$condition <- gsub(c("wt_2_day21"), "WT", seurat$condition)
+seurat$condition <- gsub(c("wt_3_day21"), "WT", seurat$condition)
+seurat$condition <- gsub(c("wt_4_day21"), "WT", seurat$condition)
+seurat$condition <- gsub(c("B1_17_1_day21"), "KO", seurat$condition)
+seurat$condition <- gsub(c("B1_17_2_day21"), "KO", seurat$condition)
+seurat$condition <- gsub(c("D2_22_1_day21"), "KO", seurat$condition)
+seurat$condition <- gsub(c("D2_22_2_day21"), "KO", seurat$condition)
+seurat$condition <- gsub(c("D2_22_3_day21"), "KO", seurat$condition)
+
+# seurat$condition2 <- seurat$condition
+# seurat$condition2 <- gsub(c("A2_day7"), "WT", seurat$condition2)
+# seurat$condition2 <- gsub(c("G8_1_1_day21"), "KO", seurat$condition2)
+# seurat$condition2 <- gsub(c("G8_1_1_day7"), "KO", seurat$condition2)
+
+seurat$condition_timepoint <- paste0(seurat$condition, "_", seurat$timepoint)
+# seurat$condition2_timepoint <- paste0(seurat$condition2, "_", seurat$timepoint)
+
+
+seurat$sample <- seurat$orig.ident
+# seurat$sample <- gsub(c("A2_day7"), "A", seurat$sample)
+seurat$sample <- gsub(c("wt_1_day7"), "WT", seurat$sample)
+seurat$sample <- gsub(c("wt_2_day7"), "WT", seurat$sample)
+seurat$sample <- gsub(c("B1_17_1_day7"), "B", seurat$sample)
+seurat$sample <- gsub(c("B1_17_2_day7"), "B", seurat$sample)
+seurat$sample <- gsub(c("D2_22_1_day7"), "D", seurat$sample)
+seurat$sample <- gsub(c("D2_22_2_day7"), "D", seurat$sample)
+# seurat$sample <- gsub(c("G8_1_1_day7"), "G", seurat$sample)
+seurat$sample <- gsub(c("wt_1_day21"), "WT", seurat$sample)
+seurat$sample <- gsub(c("wt_2_day21"), "WT", seurat$sample)
+seurat$sample <- gsub(c("wt_3_day21"), "WT", seurat$sample)
+seurat$sample <- gsub(c("wt_4_day21"), "WT", seurat$sample)
+seurat$sample <- gsub(c("B1_17_1_day21"), "B", seurat$sample)
+seurat$sample <- gsub(c("B1_17_2_day21"), "B", seurat$sample)
+seurat$sample <- gsub(c("D2_22_1_day21"), "D", seurat$sample)
+seurat$sample <- gsub(c("D2_22_2_day21"), "D", seurat$sample)
+seurat$sample <- gsub(c("D2_22_3_day21"), "D", seurat$sample)
+# seurat$sample <- gsub(c("G8_1_1_day21"), "G", seurat$sample)
+
+seurat$sample_timepoint <- paste0(seurat$sample, "_", seurat$timepoint)
+
+```
+
+```{r visualize integrated data}
+
+Idents(seurat) <- "orig.ident"
+png("Plots/umap_css_by_sample.png", width = 500, height = 500)
+DimPlot(seurat, reduction="umap_css", cols = col_sample) & NoAxes() 
+dev.off()
+
+pdf("Plots/umap_css_by_sample.pdf", width = 5, height = 5)
+plotFeature(Embeddings(seurat, "umap_css"), seurat$orig.ident, do_label = F, label_round = T, cex.label = 1.2, colorPal= col_sample, cex=0.3, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+pdf("Plots/umap_css_split_by_sample.pdf", width = 45, height = 5)
+DimPlot(seurat, reduction="umap_css", cols = col_sample, split.by = "orig.ident") & NoAxes() 
+dev.off()
+
+FeaturePlot(seurat, features = c("MECOM","CLDN5","PDGFRB","MKI67", "NR2F2", "percent.mt", "nCount_RNA", "nFeature_RNA", "ACTA2"), cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol=3, reduction = "umap_css") & NoAxes() & NoLegend()
+FeaturePlot(seurat, features = c("NR2F2","COL1A1","IGFBP5", "IGFBP3"), cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol=3, reduction = "umap_css") & NoAxes() & NoLegend()
+
+```
+
+```{r cluster}
+
+seurat <- FindNeighbors(seurat, graph.name=c("RNA_css_nn","RNA_css_snn"), reduction="csspca", dims=1:20) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.1) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.2) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.4) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.5) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.8) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=1.5) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=10)
+
+avg_av_cond_cl <- sapply(levels(seurat$RNA_css_snn_res.0.4), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_css_snn_res.0.4==x)]))
+hcl_cl <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl[VariableFeatures(seurat),])), method="ward.D2")
+cols_cl <- setNames(colorRampPalette(c("#8966A9", "#0A4A3D", "#876E08", 
+                                       "#F7DC6F", "#F1C40F", "#B7950B",  
+                                       "#E74C3C","#B03A2E",
+                                       "#73C6B6", "#43A995","#138D75", "#0E6B59"))(length(levels(seurat$RNA_css_snn_res.0.4))), levels(seurat$RNA_css_snn_res.0.4)[hcl_cl$order])
+res.0.4_levels <- c(11,10,2,3,0,1,7,8,9,6,4,5)
+
+levels_sample_time <- c("WT_day7", "WT_day21", "B_day7", "B_day21", "D_day7", "D_day21")
+seurat$sample_timepoint <- factor(seurat$sample_timepoint, levels=levels_sample_time)
+cols_sample_time <- c("#F08027","#DC3838","#F7C830","#ABC12B","#3EB4B9","#5293CC")
+                    
+pdf("Plots/umap_css_by_cluster.pdf", width = 5, height = 5)
+plotFeature(Embeddings(seurat, "umap_css"), seurat$RNA_css_snn_res.0.4, do_label = F, label_round = T, cex.label = 1.2, colorPal= cols_cl, cex=0.5, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+png("Plots/umap_css_by_cluster_labeled.png", width = 2000, height = 2000, res=500)
+DimPlot(seurat, reduction="umap_css", group.by = "RNA_css_snn_res.0.4", label=T, cols = cols_cl) & NoAxes() 
+dev.off()
+
+png("Plots/umap_css_by_cluster.png", width = 2000, height = 2000, res=500)
+DimPlot(seurat, reduction="umap_css", group.by = "RNA_css_snn_res.0.4", cols = cols_cl) & NoAxes() 
+dev.off()
+
+pdf("Plots/umap_css_by_sample_timepoint.pdf", width = 5, height = 5)
+plotFeature(Embeddings(seurat, "umap_css"), seurat$sample_timepoint, do_label = F, label_round = T, cex.label = 1.2, colorPal= cols_sample_time, cex=0.5, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+png("Plots/umap_css_by_sample_timepoint.png", width = 2000, height = 2000, res=500)
+DimPlot(seurat, reduction="umap_css", group.by = "sample_timepoint", cols = cols_sample_time) & NoAxes() 
+dev.off()
+
+```
+
+```{r}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+library(presto)
+cl_markers_presto <- wilcoxauc(seurat)
+cl_markers_presto %>%
+    filter(logFC > log(1.2) & pct_in > 20 & padj < 0.05) %>%
+    group_by(group) %>%
+    arrange(desc(logFC), .by_group=T) %>%
+    top_n(n = 10, wt = logFC) %>%
+    print(n = 40, width = Inf)
+
+```
+
+```{r save integrated object}
+
+saveRDS(seurat, "Objects/MECOM_KO_css_integrated_seurat.rds")
+
+```
+
+
+# Subset endothelial cells only
+```{r subset endotheliall cells}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+ec <- subset(seurat, idents = c(7,8))
+Idents(ec) <- "orig.ident"
+
+ec <- CellCycleScoring(ec, g2m.features=cc.genes.updated.2019$g2m.genes, s.features=cc.genes.updated.2019$s.genes) %>% FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(ec) <- setdiff(VariableFeatures(ec), c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(ec), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1]))
+
+ec <- ScaleData(ec) %>%
+  RunPCA(npcs=30, verbose=F) %>%
+  RunUMAP(dims=1:20)
+
+ec <- cluster_sim_spectrum(ec, label_tag="orig.ident", cluster_resolution=1) %>%
+  run_PCA(reduction="css", npcs=20, reduction.name="csspca", reduction.key="CSSPCA_") %>%
+  RunUMAP(reduction="csspca", dims=1:20, reduction.name="umap_css", reduction.key="UMAPCSS_")
+
+```
+
+```{r cluster endothelial cells}
+
+ec <- FindNeighbors(ec, graph.name=c("RNA_css_nn","RNA_css_snn"), reduction="csspca", dims=1:20) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.1) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.2) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.4) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.5) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.8)
+
+p1 <- UMAPPlot(ec, group.by="RNA_css_snn_res.0.1", label=T) & NoAxes() & NoLegend()
+p2 <- DimPlot(ec, reduction="umap_css", group.by="RNA_css_snn_res.0.1", label=T) & NoAxes() & NoLegend()
+(p1|p2)
+
+avg_av_cond_cl_ec <- sapply(levels(ec$RNA_css_snn_res.0.1), function(x) rowMeans(ec@assays$RNA@data[,which(ec$RNA_css_snn_res.0.1==x)]))
+hcl_cl_ec <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl_ec[VariableFeatures(ec),])), method="ward.D2")
+cols_cl_ec <- c(  "#F5B7B1","#EB6F63","#D44637", "#B03A2E")
+levels_ec_res.0.1 <- c(3,2,0,1)
+ec$RNA_css_snn_res.0.1 <- factor(ec$RNA_css_snn_res.0.1, levels=levels_ec_res.0.1)
+
+pdf("Plots/EC_umap_css_by_cluster.pdf", width = 4, height = 4)
+plotFeature(Embeddings(ec, "umap_css"), ec$RNA_css_snn_res.0.1, do_label = F, label_round = T, cex.label = 1.2, colorPal= cols_cl_ec, cex=0.7, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+png("Plots/EC_umap_css_by_cluster_labeled.png", width = 400, height = 400)
+DimPlot(ec, reduction="umap_css", group.by = "RNA_css_snn_res.0.1", label=T, cols = cols_cl_ec) & NoAxes() 
+dev.off()
+
+png("Plots/EC_umap_css_by_cluster.png", width = 400, height = 400)
+DimPlot(ec, reduction="umap_css", group.by = "RNA_css_snn_res.0.1", cols = cols_cl_ec) & NoAxes() 
+dev.off()
+
+```
+
+```{r save endothelial object}
+
+saveRDS(ec, "Objects/MECOM_KO_css_integrated_seurat_endothelial.rds")
+
+```
+
+# Subset mesoderm cells only
+```{r subset mesoderm cells}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+meso <- subset(seurat, idents = c(4,9,6,5,10))
+Idents(meso) <- "orig.ident"
+
+meso <- CellCycleScoring(meso, g2m.features=cc.genes.updated.2019$g2m.genes, s.features=cc.genes.updated.2019$s.genes) %>% FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(meso) <- setdiff(VariableFeatures(meso), c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(meso), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1]))
+
+meso <- ScaleData(meso) %>%
+  RunPCA(npcs=30, verbose=F) %>%
+  RunUMAP(dims=1:20)
+
+meso <- cluster_sim_spectrum(meso, label_tag="orig.ident", cluster_resolution=1) %>%
+  run_PCA(reduction="css", npcs=20, reduction.name="csspca", reduction.key="CSSPCA_") %>%
+  RunUMAP(reduction="csspca", dims=1:20, reduction.name="umap_css", reduction.key="UMAPCSS_")
+
+```
+
+```{r cluster mesoderm cells}
+
+meso <- FindNeighbors(meso, graph.name=c("RNA_css_nn","RNA_css_snn"), reduction="csspca", dims=1:20) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.1) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.2) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.4) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.5) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.8) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=1) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=1.5)
+
+p1 <- UMAPPlot(meso, group.by="RNA_css_snn_res.0.1", label=T) & NoAxes() & NoLegend()
+p2 <- DimPlot(meso, reduction="umap_css", group.by="RNA_css_snn_res.0.1", label=T) & NoAxes() & NoLegend()
+(p1|p2)
+
+avg_av_cond_cl_meso <- sapply(levels(meso$RNA_css_snn_res.0.1), function(x) rowMeans(meso@assays$RNA@data[,which(meso$RNA_css_snn_res.0.1==x)]))
+hcl_cl_meso <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl_meso[VariableFeatures(meso),])), method="ward.D2")
+cols_cl_meso <- c("#73C6B6","#43A995","#138D75","#0E6B59","#0A4A3D")
+levels_meso_res.0.1 <- c(1,0,2,3,4)
+meso$RNA_css_snn_res.0.1 <- factor(meso$RNA_css_snn_res.0.1, levels=levels_meso_res.0.1)
+
+pdf("Plots/Meso_umap_css_by_cluster.pdf", width = 4, height = 4)
+plotFeature(Embeddings(meso, "umap_css"), meso$RNA_css_snn_res.0.1, do_label = F, label_round = T, cex.label = 1.2, colorPal= cols_cl_meso, cex=0.7, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+png("Plots/Meso_umap_css_by_cluster_labeled.png", width = 400, height = 400)
+DimPlot(meso, reduction="umap_css", group.by = "RNA_css_snn_res.0.1", label=T, cols = cols_cl_meso) & NoAxes() 
+dev.off()
+
+png("Plots/Meso_umap_css_by_cluster.png", width = 400, height = 400)
+DimPlot(meso, reduction="umap_css", group.by = "RNA_css_snn_res.0.1", cols = cols_cl_meso) & NoAxes() 
+dev.off()
+
+```
+
+
+```{r save mesoderm object}
+
+saveRDS(meso, "Objects/MECOM_KO_css_integrated_seurat_mesoderm.rds")
+
+```
+
+# Subset mural cells only
+```{r subset mural cells}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+mural <- subset(seurat, idents = c(3,0,1,2))
+Idents(mural) <- "orig.ident"
+
+mural <- CellCycleScoring(mural, g2m.features=cc.genes.updated.2019$g2m.genes, s.features=cc.genes.updated.2019$s.genes) %>% FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(mural) <- setdiff(VariableFeatures(mural), c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(mural), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1]))
+
+mural <- ScaleData(mural) %>%
+  RunPCA(npcs=30, verbose=F) %>%
+  RunUMAP(dims=1:20)
+
+mural <- cluster_sim_spectrum(mural, label_tag="orig.ident", cluster_resolution=1) %>%
+  run_PCA(reduction="css", npcs=20, reduction.name="csspca", reduction.key="CSSPCA_") %>%
+  RunUMAP(reduction="csspca", dims=1:20, reduction.name="umap_css", reduction.key="UMAPCSS_")
+
+```
+
+```{r cluster mural cells}
+
+mural <- FindNeighbors(mural, graph.name=c("RNA_css_nn","RNA_css_snn"), reduction="csspca", dims=1:20) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.2) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.4) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.5) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.8) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=1) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=1.5)
+
+p1 <- UMAPPlot(mural, group.by="RNA_css_snn_res.0.2", label=T) & NoAxes() & NoLegend()
+p2 <- DimPlot(mural, reduction="umap_css", group.by="RNA_css_snn_res.0.2", label=T) & NoAxes() & NoLegend()
+(p1|p2)
+
+
+avg_av_cond_cl_mural <- sapply(levels(mural$RNA_css_snn_res.0.2), function(x) rowMeans(mural@assays$RNA@data[,which(mural$RNA_css_snn_res.0.2==x)]))
+hcl_cl_mural <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl_mural[VariableFeatures(mural),])), method="ward.D2")
+cols_cl_mural <- c("#F7DC6F", "#F2CA27", "#D3AC0D", "#AB8B0A", "#876E08")
+levels_mural_res.0.2 <- c(4,1,0,2,3)
+mural$RNA_css_snn_res.0.2 <- factor(mural$RNA_css_snn_res.0.2, levels=levels_mural_res.0.2)
+
+pdf("Plots/Mural_umap_css_by_cluster.pdf", width = 4, height = 4)
+plotFeature(Embeddings(mural, "umap_css"), mural$RNA_css_snn_res.0.2, do_label = F, label_round = T, cex.label = 1.2, colorPal= cols_cl_mural, cex=0.7, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+png("Plots/Mural_umap_css_by_cluster_labeled.png", width = 400, height = 400)
+DimPlot(mural, reduction="umap_css", group.by = "RNA_css_snn_res.0.2", label=T, cols = cols_cl_mural) & NoAxes() 
+dev.off()
+
+png("Plots/Mural_umap_css_by_cluster.png", width = 400, height = 400)
+DimPlot(mural, reduction="umap_css", group.by = "RNA_css_snn_res.0.2", cols = cols_cl_mural) & NoAxes() 
+dev.off()
+
+```
+
+
+```{r save mural object}
+
+saveRDS(mural, "Objects/MECOM_KO_css_integrated_seurat_mural.rds")
+
+```
+
+```{r add cell types to seurat metadata}
+
+seurat$celltype <- seurat$RNA_css_snn_res.0.4
+seurat$celltype <- gsub(c(9), "Mesoderm", seurat$celltype)
+seurat$celltype <- gsub(c(6), "Mesoderm", seurat$celltype)
+seurat$celltype <- gsub(c(5), "Mesoderm", seurat$celltype)
+seurat$celltype <- gsub(c(4), "Mesoderm", seurat$celltype)
+seurat$celltype <- gsub(c(10), "Mesoderm", seurat$celltype)
+seurat$celltype <- gsub(c(0), "Mural", seurat$celltype)
+seurat$celltype <- gsub(c(1), "Mural", seurat$celltype)
+seurat$celltype <- gsub(c(3), "Mural", seurat$celltype)
+seurat$celltype <- gsub(c(2), "Mural", seurat$celltype)
+seurat$celltype <- gsub(c(11), "Immune", seurat$celltype)
+seurat$celltype <- gsub(c(7), "Endothelial", seurat$celltype)
+seurat$celltype <- gsub(c(8), "Endothelial", seurat$celltype)
+
+```
+
+```{r add replicate to seurat metadata}
+
+seurat$replicate <- seurat$orig.ident
+seurat$replicate <- gsub(c("wt_1_day7"), "1", seurat$replicate)
+seurat$replicate <- gsub(c("wt_2_day7"), "2", seurat$replicate)
+seurat$replicate <- gsub(c("B1_17_1_day7"), "1", seurat$replicate)
+seurat$replicate <- gsub(c("B1_17_2_day7"), "2", seurat$replicate)
+seurat$replicate <- gsub(c("D2_22_1_day7"), "1", seurat$replicate)
+seurat$replicate <- gsub(c("D2_22_2_day7"), "2", seurat$replicate)
+seurat$replicate <- gsub(c("wt_1_day21"), "1", seurat$replicate)
+seurat$replicate <- gsub(c("wt_2_day21"), "2", seurat$replicate)
+seurat$replicate <- gsub(c("wt_3_day21"), "3", seurat$replicate)
+seurat$replicate <- gsub(c("wt_4_day21"), "4", seurat$replicate)
+seurat$replicate <- gsub(c("B1_17_1_day21"), "1", seurat$replicate)
+seurat$replicate <- gsub(c("B1_17_2_day21"), "2", seurat$replicate)
+seurat$replicate <- gsub(c("D2_22_1_day21"), "1", seurat$replicate)
+seurat$replicate <- gsub(c("D2_22_2_day21"), "2", seurat$replicate)
+seurat$replicate <- gsub(c("D2_22_3_day21"), "3", seurat$replicate)
+
+seurat$KO_replicate <- seurat$orig.ident
+seurat$KO_replicate <- gsub(c("wt_1_day7"), "1", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("wt_2_day7"), "2", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("B1_17_1_day7"), "1", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("B1_17_2_day7"), "2", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("D2_22_1_day7"), "3", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("D2_22_2_day7"), "4", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("wt_1_day21"), "1", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("wt_2_day21"), "2", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("wt_3_day21"), "3", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("wt_4_day21"), "4", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("B1_17_1_day21"), "1", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("B1_17_2_day21"), "2", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("D2_22_1_day21"), "3", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("D2_22_2_day21"), "4", seurat$KO_replicate)
+seurat$KO_replicate <- gsub(c("D2_22_3_day21"), "5", seurat$KO_replicate)
+
+```
+
+
+```{r save full object}
+
+saveRDS(seurat, "Objects/MECOM_KO_css_integrated_seurat.rds")
+
+```
+
+
+
+# Session info
+```{r session info}
+
+sessionInfo()
+
+```
+
+
+# Composition comparison
+
+#### Fisher's exact test
+```{r fishers exact test between all samples}
+
+freq_fisher <- function(conditions, have_identity){
+  freq <- table(factor(have_identity, levels=c(TRUE,FALSE)),
+                conditions)
+  test <- fisher.test(freq)
+  res <- setNames(c(test$estimate, test$p.value), c("oddsratio","pval_fisher"))
+  return(res)
+}
+
+RNA_css_snn_res.0.1_enrichment <- data.frame(RNA_css_snn_res.0.1 = levels(seurat$RNA_css_snn_res.0.1),
+  # loop and test every RNA_css_snn_res.0.1 cluster
+  t(sapply(levels(seurat$RNA_css_snn_res.0.1), function(RNA_css_snn_res.0.1)
+    freq_fisher(conditions = factor(seurat$condition, levels=c("WT","KO")),
+                have_identity = seurat$RNA_css_snn_res.0.1 == RNA_css_snn_res.0.1)
+  )),
+  row.names=NULL)
+RNA_css_snn_res.0.1_enrichment$padj_fisher <- p.adjust(RNA_css_snn_res.0.1_enrichment$pval_fisher)
+RNA_css_snn_res.0.1_enrichment
+
+```
+```{r}
+
+net <- get_progeny(organism = 'human', top = 100)
+net
+
+# Extract the normalized log-transformed counts
+mat_mecomko <- as.matrix(mecomko@assays$RNA@data)
+
+# Run wmean
+acts <- run_wmean(mat=mat_mecomko, net=net, .source='source', .target='target',
+                  .mor='weight', times = 100, minsize = 5)
+acts
+
+# Extract norm_wmean and store it in pathwayswmean in data
+mecomko[['pathwayswmean']] <- acts %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+
+# Change assay
+DefaultAssay(object = mecomko) <- "pathwayswmean"
+mecomko$celltype <- gsub("MuralMural","Mural",mecomko$celltype)
+mecomko$cluster_ct <- paste0(mecomko$RNA_css_snn_res.0.4, "_", mecomko$celltype)
+mecomko$condition_ct <- paste0(mecomko$condition, "_", mecomko$celltype)
+Idents(mecomko) <- "condition_ct"
+
+# Scale the data
+mecomko <- ScaleData(mecomko)
+mecomko@assays$pathwayswmean@data <- mecomko@assays$pathwayswmean@scale.data
+
+p1 <- DimPlot(mecomko, reduction = "umap", label = TRUE, pt.size = 0.5) + 
+  NoLegend() + ggtitle('Cell types')
+p2 <- (FeaturePlot(mecomko, features = c("Trail")) & 
+  scale_colour_gradient2(low = 'blue', mid = 'white', high = 'red')) +
+  ggtitle('Trail activity')
+p1 | p2
+
+# Extract activities from object as a long dataframe
+df_ec <- t(as.matrix(mecomko@assays$pathwayswmean@data)) %>%
+  as.data.frame() %>%
+  mutate(cluster = Idents(mecomko)) %>%
+  pivot_longer(cols = -cluster, names_to = "source", values_to = "score") %>%
+  group_by(cluster, source) %>%
+  summarise(mean = mean(score))
+
+# Transform to wide matrix
+top_acts_mat_ec <- df_ec %>%
+  pivot_wider(id_cols = 'cluster', names_from = 'source',
+              values_from = 'mean') %>%
+  column_to_rownames('cluster') %>%
+  as.matrix()
+top_acts_mat_ec <- top_acts_mat_ec[,-1]
+top_acts_mat_ec <- top_acts_mat_ec[,-2]
+
+# Choose color palette
+palette_length = 100
+my_color = colorRampPalette(c("#710085", "#E0E2DD","#006b02"))(palette_length)
+
+my_breaks <- c(seq(-2, 0, length.out=ceiling(palette_length/2) + 1),
+               seq(0.05, 2, length.out=floor(palette_length/2)))
+
+# Plot
+pdf("Plots/Seurat_objects_integrated/pathway_progeny_TS_BBB_endothelial.pdf")
+pheatmap(top_acts_mat_ec, border_color = NA, color=my_color, breaks = my_breaks, cluster_rows = T, cluster_cols = T, scale = "row")
+dev.off()
+
+pheatmap(top_acts_mat_ec, border_color = NA, color=my_color, breaks = my_breaks, cluster_rows = T, cluster_cols = T, scale = "row")
+pheatmap(top_acts_mat_ec, border_color = NA, color=my_color, breaks = my_breaks, cluster_rows = T, cluster_cols = T)
+pheatmap(top_acts_mat_ec, border_color = NA, color=my_color, breaks = my_breaks, cluster_rows = T, cluster_cols = T, scale = "column")
+
+
+```
+
+```
+

@@ -1,0 +1,159 @@
+---
+title: "Cell line comparison - BVO differentiation"
+author: "Marina Nikolova"
+date: "2023-09-11"
+output: html_document
+---
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+library(ggrepel)
+library(uwot)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+show_col(c(c("#1F618D","#2874A6"),
+                     colorRampPalette(c("#0a4a3d","#138D75","#73C6B6"))(5),
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B","#876e08"))(5),
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(4), 
+                     c("#BFC9CA","#566573","#273746")))
+
+```
+
+#### Load and prepare data
+
+```{r load data}
+
+# Load preprocessed data
+H9_NC8_timecourse <- readRDS(file="~/H9_NC8_VO_timecourse_15pt_mt_threshold.rds")
+H9_NC8_d7_14_21 <- subset(H9_NC8_timecourse, subset = sample %in% c("D7", "D14", "D21"))
+
+memRFP_WTC <- readRDS(file="~/memRFP_WTC_merged_three_timepoints.rds")
+merged_nickase <- readRDS(file="~/merged_nickase.rds")
+
+```
+
+```{r load and demultiplex 409B2 nuclease data}
+
+# Demuxlet was run separately in terminal
+# All information regarding these steps can be found in:
+# "Demuxlet_WTC_409B2_step_by_step.txt"
+
+# createseurat object
+nuclease_day14 <- CreateSeuratObject(counts = Read10X(data.dir = "~/processed/I_J_d14/outs/filtered_feature_bc_matrix"), project = "nuclease_day14", min.cells = 3, min.features = 500)
+nuclease_day14$sample <- "D14"
+
+# add demultiplexing data to the metadata
+# load the data
+demuxlet <- read.table("~/409B2_WTC_BVO_d14_I_J.best", header =T, row.names=1, stringsAsFactors=F)
+# name each barcode with a singlet, doublet or ambiguous cell type
+demuxlet <- setNames(demuxlet$BEST, rownames(demuxlet))
+# add to the metadata, under the line column
+nuclease_day14@meta.data$line <- demuxlet[rownames(nuclease_day14@meta.data)]
+table(nuclease_day14@meta.data$line)
+sum(is.na(nuclease_day14@meta.data$line))
+# To rename legend for identity based on cell line:
+new.cluster.ids <- setNames(c("AMB-409B2-WTC-409B2/WTC", "AMB-409B2-WTC-WTC/409B2", "AMB-WTC-409B2-409B2/WTC", "AMB-WTC-409B2-WTC/409B2", "DBL-409B2-WTC-0.500", "DBL-WTC-409B2-0.500", "409b2", "WTC"), sort(unique(nuclease_day14@meta.data$line)))
+nuclease_day14@meta.data$line <- new.cluster.ids[as.character(nuclease_day14@meta.data$line)]
+table(nuclease_day14$line)
+
+# 409b2_nuclease AMB-409B2-WTC-409B2/WTC AMB-409B2-WTC-WTC/409B2 AMB-WTC-409B2-409B2/WTC AMB-WTC-409B2-WTC/409B2     DBL-409B2-WTC-0.500     DBL-WTC-409B2-0.500         WTC 
+#     3567                  64                      97                       3                       1                       52                       11                 493 
+# Keep only singlets
+Idents(nuclease_day14) <- "line"
+nuclease_day14 <- subset(nuclease_day14, idents = c("409b2")) 
+
+```
+
+#### Merge data
+```{r merge all objects}
+
+merged_cell_lines <- merge(H9_NC8_d7_14_21, list(memRFP_WTC, 
+                              merged_nickase, 
+                              nuclease_day14))
+merged_cell_lines <- PercentageFeatureSet(merged_cell_lines, "^MT-", col.name = "percent.mt")
+merged_cell_lines$sample_line <- paste0(merged_cell_lines$sample, "_", merged_cell_lines$line)
+Idents(merged_cell_lines) <- "sample_line"
+merged_cell_lines <- subset(merged_cell_lines, idents =c("D14_409b2", "D14_memRFP_WTC", "D14_Singlet H9", "D14_Singlet NC8", "D14_memRFP_WTC", "D21_409b2", "D21_memRFP_WTC", "D21_Singlet H9", "D21_Singlet NC8", "D7_409b2", "D7_memRFP_WTC", "D7_Singlet H9", "D7_Singlet NC8"))
+
+merged_cell_lines$line <- gsub("Singlet H9","H9", merged_cell_lines$line)
+merged_cell_lines$line <- gsub("Singlet NC8","NC8", merged_cell_lines$line)
+merged_cell_lines$sample_line <- gsub("D14_Singlet H9","D14_H9", merged_cell_lines$sample_line)
+merged_cell_lines$sample_line <- gsub("D14_Singlet NC8","D14_NC8", merged_cell_lines$sample_line)
+merged_cell_lines$sample_line <- gsub("D21_Singlet H9","D21_H9", merged_cell_lines$sample_line)
+merged_cell_lines$sample_line <- gsub("D21_Singlet NC8","D21_NC8", merged_cell_lines$sample_line)
+merged_cell_lines$sample_line <- gsub("D7_Singlet H9","D7_H9", merged_cell_lines$sample_line)
+merged_cell_lines$sample_line <- gsub("D7_Singlet NC8","D7_NC8", merged_cell_lines$sample_line)
+merged_cell_lines$line <- gsub("Singlet H9","H9", merged_cell_lines$line)
+merged_cell_lines$line <- gsub("Singlet NC8","NC8", merged_cell_lines$line)
+
+```
+
+#### QC and integration
+```{r check QC pre-filtering}
+
+sample_line_levels <- c("D7_409b2", "D7_H9","D7_memRFP_WTC","D7_NC8", "D14_409b2", "D14_H9", "D14_memRFP_WTC", "D14_NC8", "D21_409b2", "D21_H9","D21_memRFP_WTC","D21_NC8")
+merged_cell_lines$sample_line <- factor(merged_cell_lines$sample_line, levels = sample_line_levels)
+Idents(merged_cell_lines) <- "sample_line"
+
+VlnPlot(merged_cell_lines, features = c("nFeature_RNA"), pt.size = 0) | VlnPlot(merged_cell_lines, features = c("nCount_RNA"), pt.size = 0) | VlnPlot(merged_cell_lines, features = c("percent.mt"), pt.size = 0)
+
+```
+
+```{r QC}
+
+merged_cell_lines <- subset(merged_cell_lines, subset = percent.mt < 15)
+
+```
+
+```{r check QC post-filtering}
+
+VlnPlot(merged_cell_lines, features = c("nFeature_RNA"), pt.size = 0) |VlnPlot(merged_cell_lines, features = c("nCount_RNA"), pt.size = 0) | VlnPlot(merged_cell_lines, features = c("percent.mt"), pt.size = 0)
+
+```
+
+```{r pre-process and integrate}
+
+seurat <- NormalizeData(merged_cell_lines) %>%
+  FindVariableFeatures(nfeatures = 3000) %>%
+  CellCycleScoring(g2m.features = cc.genes.updated.2019$g2m.genes, s.features = cc.genes.updated.2019$s.genes)
+blacklist <- c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(seurat), value=T), read.table("~/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+VariableFeatures(seurat) <- setdiff(VariableFeatures(seurat), blacklist)
+seurat <- ScaleData(seurat, vars.to.regress = c("percent.mt", "nFeature_RNA")) %>%
+  RunPCA(npcs = 30, verbose=F) 
+
+seurat <- cluster_sim_spectrum(seurat, label_tag="sample_line", cluster_resolution = 1)
+seurat <- RunUMAP(seurat, reduction="css", dims=1:ncol(Embeddings(seurat,"css")), reduction.name="umap_css", reduction.key="UMAPCSS_", seed = 46)
+
+seurat <- FindNeighbors(seurat, reduction="css", dims=1:ncol(Embeddings(seurat,"css"))) %>%
+  FindClusters(resolution = 0.1) %>%
+  FindClusters(resolution = 0.2) %>%
+  FindClusters(resolution = 0.3) %>%
+  FindClusters(resolution = 0.4) %>%
+  FindClusters(resolution = 0.5) %>%
+  FindClusters(resolution = 0.6) %>%
+  FindClusters(resolution = 0.8) %>%
+  FindClusters(resolution = 10)
+
+```
+
+```{r save integrated object}
+
+saveRDS(seurat, "BVO_diff_cell_lines.rds")
+
+```
+
+

@@ -1,0 +1,49 @@
+---
+title: "CITE-seq-Count outs to hasthag oligo classification"
+author: "Marina Nikolova"
+date: "11/08/2022"
+output: html_document
+---
+
+```{r setup}
+
+library (tidyverse)
+library (Seurat)
+
+```
+
+```{r load objects}
+
+# load the objects
+HTO_rep1 <- Read10X("~/HTO_rep1/umi_count", gene.column = 1) %>%  # input = sparse matrix (rows = tags, columns = cells)
+        as.matrix %>%                                                                                                                                             # conversion of the S4 object sparse matrix into a normal R matrix
+        t %>%                                                                                                                                                     # transpose the matrix
+        `colnames<-`(., str_extract(colnames(.), "HTO[0-9]+|unmapped"))                                                                                           # this last line is a tidyverse based way to change the names of the columns. The syntax sets as "colnames" any component of a column name that has the word "HTO" + a number or "unmapped". 
+
+HTO_rep2 <- Read10X("~/HTO_rep2/umi_count", gene.column = 1) %>%  
+        as.matrix %>%                                                                                                                                            
+        t %>%                                                                                                                                                    
+        `colnames<-`(., str_extract(colnames(.), "HTO[0-9]+|unmapped"))     
+
+# Have a look at the objects
+head(HTO_rep1, n=50)
+head(HTO_rep2, n=50)
+
+```
+
+```{r wrangle and transpose the matrices}
+
+# Delete the column 13, which corresponds to HTOs which have not been used in this experiment and column 14, which corresponds to unmapped reads and confounds downstream processing
+HTO_rep1 <- HTO_rep1[,-13:-14]
+HTO_rep2 <- HTO_rep2[,-13:-14]
+
+# Save the hashtag count matrix (hashtags in rownames) to use with HTODemux
+HTO_rep1 <- t(HTO_rep1)
+HTO_rep2 <- t(HTO_rep2)
+
+# Have a look at the matrices
+rownames(HTO_rep1)
+rownames(HTO_rep2)
+
+```
+

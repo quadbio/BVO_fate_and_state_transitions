@@ -1,0 +1,235 @@
+---
+title: "Seurat analysis of HTO demultiplexed samples processed by ZH"
+author: "Marina Nikolova"
+date: "08/04/2023"
+output: html_document
+---
+
+# Basic setup
+## Load packages
+```{r load packages, echo = F}
+
+library(Seurat)
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+library(Matrix)
+library(SeuratWrappers)
+library(simspec)
+library(harmony)
+library(presto)
+library(gplots)
+library(clusterProfiler)
+library(enrichplot)
+library("org.Hs.eg.db")
+library("AnnotationDbi")
+library(ReactomePA)
+library(UpSetR)
+
+source("~/feature_plots.r")
+
+
+# reorder the samples in the metadata to appear in the order desired by us
+hto_levels <- factor(c("HTO1","HTO2", "HTO3", "HTO4","HTO5", "HTO6", "HTO7","HTO8", "HTO9", "HTO10", "HTO12", "HTO13"))
+# reorder the samples in the metadata to appear in the order desired by us
+hto_levels <- factor(hto_levels)
+# generate color palette
+col_hto <- setNames(prettyrainbow_colscheme(length(hto_levels)), hto_levels)
+
+```
+
+## Read in the data
+```{r reading the data}
+
+# Load the mRNA count matrices
+seurat <- readRDS("~/seurat.processed.rds")
+write.csv(VariableFeatures(seurat), "~/variable_features.csv")
+
+# Set the order of levels of HTO_classification
+seurat$HTO_classification <- factor(x = seurat$HTO_classification, levels = hto_levels)
+
+# generate average cluster expression for RNA_snn_res.1, cluster hierarchically and set colors
+avg_expr_cl <- sapply(levels(seurat$RNA_snn_res.1), function(cl) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_snn_res.1 == cl)]))
+hcl_cl <- hclust(as.dist(1-cor(avg_expr_cl[VariableFeatures(seurat),])), method="ward.D2")
+col_cl <- setNames(colorRampPalette(RColorBrewer::brewer.pal(8,"Spectral"))(length(levels(seurat$RNA_snn_res.1))), levels(seurat$RNA_snn_res.1)[hcl_cl$order])
+plot(hcl_cl)
+
+# Set the order of levels of RNA_snn_res.1
+seurat$RNA_snn_res.1 <- factor(x = seurat$RNA_snn_res.1, levels = levels(seurat$RNA_snn_res.1)[hcl_cl$order])
+
+```
+
+#### Cluster analysis
+```{r find cluster markers RNA_snn_res.0.4}
+
+seurat <- seurat %>%
+  FindClusters(resolution = 0.5) %>%
+  FindClusters(resolution = 0.4) %>%
+  FindClusters(resolution = 0.2)
+
+plotFeature(Embeddings(seurat,"umap_csscc"), seurat$RNA_snn_res.0.4, pt_border = T, lwd_border = 0.1, cex=0.5, do_legend = F)
+
+Idents(seurat) <-  "RNA_snn_res.0.4"
+lev <- factor(c(3,5,9,6,8,1,0,2,4,10,7))
+seurat$RNA_snn_res.0.4 <- factor(seurat$RNA_snn_res.0.4, levels = lev)
+table(seurat$HTO_classification, seurat$RNA_snn_res.0.4)
+
+cl_markers <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+top_cl_markers_unique <- top_cl_markers[!duplicated(top_cl_markers[ , "gene"]), ]  # Delete rows
+top2_cl_markers_unique <- top_cl_markers_unique %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+# Reorder the data frame with cluster markers by desired cluster order (levels)
+top2_cl_markers_unique <- top2_cl_markers_unique[match(lev, top2_cl_markers_unique$cluster),]
+
+plotFeature(Embeddings(seurat,"umap_csscc"), seurat$RNA_snn_res.0.4, pt_border = T, lwd_border = 0.1, cex=0.5, do_legend = F, do_label = T)
+
+# 3,5,9,6,8,1,0,2,4,10,7
+    DotPlot(seurat, features=rev(top2_cl_markers_unique$gene), group.by = "RNA_snn_res.0.4", cols = c("gray", "black")) + RotatedAxis() + coord_flip()
+
+# generate color palette
+col_ct.0.4 <- setNames(c("#B03A2E", "#D44637", "#EB6F63", # endothelial cells (3,5,90)
+                     "#F7DC6F", "#F5D44F", "#F3CC2F", "#F1C40F", "#DDB40D", "#CAA40C","#B7950B", # mural cells (6,8,1,0,2,4,10)
+                      "#BFC9CA" # others (7)
+                     ), factor(lev))
+
+plotFeature(Embeddings(seurat,"umap_csscc"), seurat$RNA_snn_res.0.4, colorPal=col_ct.0.4, pt_border = T, lwd_border = 0.1, cex=0.5, do_legend = F)
+
+DimPlot(seurat, group.by="RNA_snn_res.0.4", reduction="umap_csscc", cols = col_ct.0.4, pt.size = 0.4, label = T) & NoAxes()
+
+# Plot cell proportions with this cluster resolution
+# create a dataset
+ct_hto <- as.data.frame(table(seurat$RNA_snn_res.0.4, seurat$HTO_classification))
+      colnames(ct_hto)[which(names(ct_hto) == "Var1")] <- "RNA_snn_res.0.4"
+      colnames(ct_hto)[which(names(ct_hto) == "Var2")] <- "HTO"
+# Stacked condition per cluster
+  ggplot(ct_hto, aes(fill=HTO, y=Freq, x=RNA_snn_res.0.4)) + 
+      geom_bar(position="fill", stat="identity") + 
+      ggplot2::theme_classic() + 
+      xlab("RNA_snn_res.0.4") + 
+      ylab("Proportion of cells") +
+      scale_fill_manual(values=col_hto) +
+     theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+
+```
+
+#### Generate endothelial cells only object
+```{r create endothelial cells object}
+
+#'@param vars Data frame of the variables to regress out
+#'
+#'@rdname regress_out_from_embeddings
+#'@export
+#'@method regress_out_from_embeddings default
+regress_out_from_embeddings.default <- function(object,
+                                                vars)
+{
+  if (requireNamespace("pbapply", quietly = T)){
+    apply <- pbapply::pbapply
+  }
+  
+  emb <- apply(object, 2, function(x){
+    dat <- data.frame(x_ = x, vars)
+    residuals(lm(x_ ~ ., data = dat))
+  })
+  colnames(emb) <- colnames(object)
+  return(emb)
+}
+
+#'@param reduction Name of the reduction object to use
+#'@param vars_to_regress Variables in the meta.data slot for regressing out
+#'@param reduction.name Name of the new reduction object
+#'@param reduction,key Key of the returned reduction
+#'
+#'@rdname regress_out_from_embeddings
+#'@export
+#'@method regress_out_from_embeddings Seurat
+regress_out_from_embeddings <- function(object,
+                                               reduction,
+                                               vars_to_regress,
+                                               reduction.name = reduction,
+                                               reduction.key = NULL)
+{
+  emb <- Embeddings(object, reduction)
+  vars <- setNames(data.frame(object@meta.data[,vars_to_regress],
+                              row.names = colnames(object)),
+                   vars_to_regress)
+  emb_new <- regress_out_from_embeddings.default(object = emb,
+                                                 vars = vars)
+  colnames(emb_new) <- NULL
+  object[[reduction.name]] <- CreateDimReducObject(emb_new, key = reduction.key, assay = object[[reduction]]@assay.used)
+  return(object)
+}
+
+# Define major cell types
+seurat$major_ct <- setNames(rep(c("endothelial","mesenchymal","others"),
+                                c(3,9,2)),
+                            c(3,6,10,
+                              7,11,8,2,1,4,5,0,13,
+                              12,9))[as.character(seurat$RNA_snn_res.1)]
+
+# Endothelial cells
+seurat_endo <- subset(seurat, subset = major_ct == "endothelial") %>%
+  FindVariableFeatures()
+blacklist <- c(unlist(cc.genes.updated.2019), grep("^MT-",rownames(seurat_endo),value=T), read.table("~/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+VariableFeatures(seurat_endo) <- setdiff(VariableFeatures(seurat_endo), blacklist)
+seurat_endo <- ScaleData(seurat_endo) %>%
+  RunPCA(npcs = 20) %>%
+  RunUMAP(dims = 1:20)
+seurat_endo <- cluster_sim_spectrum(seurat_endo, label_tag = "HTO_classification", cluster_resolution = 1) %>%
+  run_PCA(reduction = "css", npcs = 10, reduction.name = "csspca", reduction.key="CSSPCA_") %>%
+  regress_out_from_embeddings(reduction = "csspca", vars_to_regress = c("G2M.Score","S.Score"), reduction.name = "csspca_cc", reduction.key = "CSSPCACC_")
+seurat_endo <- RunUMAP(seurat_endo, reduction = "csspca", dims = 1:10, reduction.name = "umap_css", reduction.key = "UMAPCSS_")
+seurat_endo <- FindNeighbors(seurat_endo, reduction = "csspca", dims = 1:10) %>%
+  FindClusters(resolution = 0.5) %>%
+  FindClusters(resolution = 0.4) %>%
+  FindClusters(resolution = 0.2)
+# Set the order of levels of HTO_classification
+seurat_endo$HTO_classification <- factor(x = seurat_endo$HTO_classification, levels = hto_levels)
+
+```
+
+
+# Plot basic infromation
+
+#### Plot UMAPs colored by various measures.
+
+```{r plot integrated object}
+
+# plot all cells from all samples
+  plotFeature(Embeddings(seurat,"umap_csscc"), seurat$HTO_classification, colorPal=col_hto, pt_border = T, lwd_border = 0.1, cex=0.5, do_legend = F)
+  plotFeature(Embeddings(seurat,"umap_csscc"), seurat$celltype, colorPal=col_ct, pt_border = T, lwd_border = 0.1, cex=0.5, do_legend = F)
+  plotFeature(Embeddings(seurat,"umap_csscc"), seurat$RNA_snn_res.1, colorPal=col_cl, pt_border = T, lwd_border = 0.1, cex=0.5, do_legend = F)
+
+# Plot marker genes
+markers <- c("CLDN5", "CDH5","MECOM", "PECAM1","KDR", "GJA4","CXCR4", "APLNR", "NR2F2","VWF","MFSD2A","SLC16A1","PLVAP","ESM1","HEY1", "IGFBP3","CSPG4","PDGFRB","KCNJ8", "ANPEP", "MCAM", "ACTA2","TAGLN","DCN", "DLK1","LUM","PAX8","PAX6","MKI67","COL1A1")
+
+plotMultiFeatures(Embeddings(seurat, "umap_css"),
+                  seurat@assays$RNA@data[markers,],
+                  ncol=6, colorPal=blue_colscheme, cex=0.5, par_cex = 0.8, mar = c(1,1,2,2), cex.main=1, sort_by_value=T)
+
+```
+
+#### Plot proportions of cells per cluster and protocol.
+```{r plot cell proportions}
+
+# create a dataset
+ct_hto <- as.data.frame(table(seurat$celltype, seurat$HTO_classification))
+ct_hto$Var1 <- factor(x = ct_hto$Var1, levels = c("all"))
+
+colnames(ct_hto)[which(names(ct_hto) == "Var1")] <- "Celltype"
+colnames(ct_hto)[which(names(ct_hto) == "Var2")] <- "HTO"
+
+# Stacked
+ggplot(ct_hto, aes(fill=HTO, y=Freq, x="")) +
+    geom_bar(position="fill", stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Celltype") +
+    ylab("Proportion of cells") +
+    scale_fill_manual(values = col_hto) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+
+```

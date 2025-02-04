@@ -1,0 +1,214 @@
+---
+title: "Brain BVOs HTO assignment"
+author: "Marina Nikolova"
+date: "11/08/2022"
+output: html_document
+---
+
+# Basic setup
+## Load packages
+```{r load packages}
+
+library(Seurat)
+library(tidyverse)
+library(dplyr)
+
+source("~/feature_plots.r")
+
+```
+
+## Read in the data
+```{r reading the data}
+
+# Load the mRNA count matrices
+rep1.umi <- Read10X("~/rep1/outs/filtered_feature_bc_matrix/")
+rep2.umi <- Read10X("!/rep2/outs/filtered_feature_bc_matrix/")
+
+# Load the HTO count matrices
+rep1.hto <- readRDS("~/rep1_hto_mtx.rds")
+rep2.hto <- readRDS("~/rep2_hto_mtx.rds")
+
+# Check the number of cells
+ncol(rep1.umi)
+ncol(rep2.umi)
+
+```
+
+```{r prepare mRNA matrices}
+
+# The column names (cells) have an additional "-1" which is not present in the HTO counts
+# To allow for joining of the common barcodes in both matrices, we rename the barcodes by removing the additional "-1" pattern
+colnames_rep1 <- colnames(rep1.umi)
+colnames_rep1 <- gsub("-1", "", colnames_rep1)
+colnames(rep1.umi) <- colnames_rep1
+
+colnames_rep2 <- colnames(rep2.umi)
+colnames_rep2 <- gsub("-1", "", colnames_rep2)
+colnames(rep2.umi) <- colnames_rep2
+
+```
+
+
+## Generate joint barcode matrices
+```{r joint matrices}
+
+# Select cell barcodes detected by both RNA and HTO 
+rep1.joint.bcs <- intersect(colnames(rep1.umi), colnames(rep1.hto))
+rep2.joint.bcs <- intersect(colnames(rep2.umi), colnames(rep2.hto))
+
+# Check how many cells have an assigned barcode
+table(colnames(rep1.umi) %in% colnames(rep1.hto))
+table(colnames(rep2.umi) %in% colnames(rep2.hto))
+
+# Subset RNA and HTO counts by joint cell barcodes
+rep1.umi <- rep1.umi[, rep1.joint.bcs]
+rep2.umi <- rep2.umi[, rep2.joint.bcs]
+
+rep1.hto <- as.matrix(rep1.hto[, rep1.joint.bcs])
+rep2.hto <- as.matrix(rep2.hto[, rep2.joint.bcs])
+
+# Confirm that the HTO have the correct names
+rownames(rep1.hto)
+rownames(rep2.hto)
+
+```
+
+## Setup Seurat object and add in the HTO data
+```{r setup seurat with HTO}
+
+# Setup Seurat object
+rep1.hashtag <- CreateSeuratObject(counts = rep1.umi, project = "Replicate1")
+rep2.hashtag <- CreateSeuratObject(counts = rep2.umi, project = "Replicate2")
+
+# Normalize, find variable features, scale the data and run PCA on the RNA data with log normalization
+rep1.hashtag <- NormalizeData(rep1.hashtag) 
+rep2.hashtag <- NormalizeData(rep2.hashtag) 
+
+```
+
+# Demultiplex cells based on HTO enrichment
+## Add HTO as an indepent assay to the Seurat object
+```{r add HTO data}
+
+# Add HTO data as a new assay independent from RNA
+rep1.hashtag[["HTO"]] <- CreateAssayObject(counts = rep1.hto)
+rep2.hashtag[["HTO"]] <- CreateAssayObject(counts = rep2.hto)
+
+# Normalize HTO data, here we use centered log-ratio (CLR) transformation
+rep1.hashtag <- NormalizeData(rep1.hashtag, assay = "HTO", normalization.method = "CLR", margin = 2)
+rep2.hashtag <- NormalizeData(rep2.hashtag, assay = "HTO", normalization.method = "CLR", margin = 2)
+
+```
+
+## Demultiplex using the Seurat function HTODemux() to assign single cells back to their sample origins
+```{r demultiplex}
+
+# If one has a very large dataset Seurat suggests using k_function = 'clara'. 
+# This is a k-medoid clustering function for large applications 
+# One can also play with additional parameters (see documentation for HTODemux()) to adjust the threshold for classification 
+# Here I am using the default settings
+rep1.hashtag <- HTODemux(rep1.hashtag, assay = "HTO", positive.quantile = 0.99)
+rep2.hashtag <- HTODemux(rep2.hashtag, assay = "HTO", positive.quantile = 0.99)
+
+```
+
+# Visualization
+## Output from running HTODemux() is saved in the object metadata
+## We can visualize how many cells are classified as singlets, doublets and negative/ambiguous cells
+```{r visualize HTO classification}
+
+# Global classification results
+table(rep1.hashtag$HTO_classification.global)
+table(rep2.hashtag$HTO_classification.global)
+
+# Change the order to display the hashtags 
+hto_order <- c("Doublet", "HTO1", "HTO2", "HTO3", "HTO4", "HTO5", "HTO6", "HTO7", "HTO8", "HTO9", "HTO10", "HTO12", "HTO13", "HTO14", "Negative")
+rep1.hashtag@meta.data$hash.ID <- factor(rep1.hashtag@meta.data$hash.ID, levels = hto_order)
+rep2.hashtag@meta.data$hash.ID <- factor(rep2.hashtag@meta.data$hash.ID, levels = hto_order)
+
+# Group cells based on the max HTO signal
+rep1.hashtag@meta.data$HTO_maxID <- factor(rep1.hashtag@meta.data$HTO_maxID, levels = hto_order)
+Idents(rep1.hashtag) <- "HTO_maxID"
+RidgePlot(rep1.hashtag, assay = "HTO", features = rownames(rep1.hashtag[["HTO"]])[1:12], ncol = 4)
+
+rep2.hashtag@meta.data$HTO_maxID <- factor(rep2.hashtag@meta.data$HTO_maxID, levels = hto_order)
+Idents(rep2.hashtag) <- "HTO_maxID"
+RidgePlot(rep2.hashtag, assay = "HTO", features = rownames(rep2.hashtag[["HTO"]])[1:12], ncol = 4)
+
+```
+## Visualize pairs of HTO signals to confirm mutual exclusivity in singlets
+
+```{r scatter plot}
+
+# Check a few random 
+FeatureScatter(rep1.hashtag, feature1 = "hto_HTO1", feature2 = "hto_HTO2")
+FeatureScatter(rep1.hashtag, feature1 = "hto_HTO5", feature2 = "hto_HTO7")
+FeatureScatter(rep2.hashtag, feature1 = "hto_HTO1", feature2 = "hto_HTO2")
+FeatureScatter(rep2.hashtag, feature1 = "hto_HTO5", feature2 = "hto_HTO7")
+
+```
+
+## Compare number of UMIs for singlets, doublets and negative cells
+```{r QC of HTOs}
+
+global.order <- c("Singlet", "Doublet", "Negative")
+rep1.hashtag@meta.data$HTO_classification.global <- factor(rep1.hashtag@meta.data$HTO_classification.global, levels = global.order)
+rep2.hashtag@meta.data$HTO_classification.global <- factor(rep2.hashtag@meta.data$HTO_classification.global, levels = global.order)
+
+# Assign the droplets singlets, doublets or negative identities
+Idents(rep1.hashtag) <- "HTO_classification.global"
+Idents(rep2.hashtag) <- "HTO_classification.global"
+
+# Plot UMI counts 
+VlnPlot(rep1.hashtag, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+VlnPlot(rep2.hashtag, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+
+```
+
+## Generate a two dimensional tSNE embedding for HTOs.Here we are grouping cells by singlets and doublets for simplicity
+```{r 2D embedding of HTOs}
+
+# First, we will remove negative cells from the object
+rep1.hashtag.subset <- subset(rep1.hashtag, idents = "Negative", invert = TRUE)
+rep2.hashtag.subset <- subset(rep2.hashtag, idents = "Negative", invert = TRUE)
+
+# Calculate a tSNE embedding of the HTO data
+# For each replicate separately
+DefaultAssay(rep1.hashtag.subset) <- "HTO"
+DefaultAssay(rep2.hashtag.subset) <- "HTO"
+
+rep1.hashtag.subset <- ScaleData(rep1.hashtag.subset, features = rownames(rep1.hashtag.subset), verbose = FALSE) %>% 
+                      RunPCA(features = rownames(rep1.hashtag.subset), approx = FALSE) %>%
+                      RunTSNE(dims = 1:8, perplexity = 100)
+rep2.hashtag.subset <- ScaleData(rep2.hashtag.subset, features = rownames(rep2.hashtag.subset), verbose = FALSE) %>% 
+                      RunPCA(features = rownames(rep2.hashtag.subset), approx = FALSE) %>%
+                      RunTSNE(dims = 1:8, perplexity = 100)
+
+Idents(rep1.hashtag.subset) <- "HTO_classification.global"
+Idents(rep2.hashtag.subset) <- "HTO_classification.global"
+DimPlot(rep1.hashtag.subset) | DimPlot(rep2.hashtag.subset) 
+
+# One can also visualize the more detailed classification result by running Idents(object) <- 'HTO_classification' before plotting. 
+# Here, one can see that each of the small clouds on the tSNE plot corresponds to one of the 28 possible doublet combinations.
+Idents(rep1.hashtag.subset) <- 'hash.ID' 
+Idents(rep2.hashtag.subset) <- 'hash.ID' 
+( DimPlot(rep1.hashtag.subset) | DimPlot(rep2.hashtag.subset) )
+
+```
+## Create an HTO heatmap
+```{r HTO heatmap}
+
+# To increase the efficiency of plotting, you can subsample cells using the num.cells argument
+HTOHeatmap(rep1.hashtag, assay = "HTO", ncells = 5000)
+HTOHeatmap(rep2.hashtag, assay = "HTO", ncells = 5000)
+
+```
+
+## Prepare the mRNA transcript data for analysis and visualization
+```{r}
+
+# Extract the singlets
+rep1.singlet <- subset(rep1.hashtag, idents = "Singlet")
+rep2.singlet <- subset(rep2.hashtag, idents = "Singlet")
+
+```

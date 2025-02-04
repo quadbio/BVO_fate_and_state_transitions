@@ -1,0 +1,870 @@
+---
+title: "Analysis of BVOs with TF overexpression tp make brain-like vasculature"
+author: "Marina Nikolova"
+date: "2024-02-21"
+output: html_document
+---
+
+# Setup
+
+Load packages.
+```{r load packages, echo = FALSE, message=FALSE, warning=FALSE}
+
+library(Seurat)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(gplots)
+library(enrichR)
+library(rrvgo)
+library(biomartr)
+s
+source("~/feature_plots.r")
+
+```
+
+```{r markers lists}
+
+bbb.markers <- c("CLDN5","PECAM1","KDR","CDH5", "SOX18", "SLC2A1", "SLC39A10","ABCB1", "SLC1A1", "SLC38A5", "SLC7A5", "SLC7A1", "SOX1", "TAL1", "SOX7", "ETS1", "LEF1", "TJP1", "TJP2", "MARVELD2", "JAM2", "MFSD2A", "OCLN","TNFRF21","GJA1","GJA4","GJA5")
+TFs <- c("ETS1", "NR3C1", "LEF1", "FOXQ1", "ZIC3","TCF4")
+markers_zh <- c("SLC2A1","APCDD1","TNFRSF19","AXIN2","SHROOM1","CGN","LRP6","HEY1","GJA5","CLDN5","HEY2","TJP2","FZD4","PLVAP","FLT1","ESM1","TGFBI","JAK3","JAK1","CTGF","PDGFB","SERPINE1","GJA4","ICAM1","NFATC2")
+
+
+ec_bbb_markers <- c("CD34","KDR", "INSR", # general, receptors
+                    "TJP1","TJP2","CLDN5","MARVELD2","OCLN", # tight junctions "#177abd"
+                    "JAM2","JAM3","CDH5","PECAM1","ESAM", # adhesion molecules "#0aa667"
+                    "GJA1","GJA5", # gap junctions (GJA2 belongs here too but was not expressed in the BVO data) "#bfad0a"
+                    "PLVAP", "MFSD2A","ABCA1","ABCA2","ABCB1","ABCG2","LEPR","TFRC","SLC1A1","SLC2A1","SLC2A3","SLC3A2","SLC5A3","SLC7A11","SLC16A1","SLC38A2","SLC38A3","SLC38A5","SLCO1A2", #transcellular transporters (PLVAP should be low) "#EE8176"
+                    "CUX1","ETS1","FLI1","FOXC1","FOXP1","FOXQ1","KLF13","LEF1","NR3C1","PPARD","SMAD1","SOX7","SOX11","SOX17","TAL1","TCF4","ZEB1","ZIC1","ZIC2","ZIC3", # TFs "#D6963A"
+                    "MAOA", "AXIN1","AXIN2" # others "#a44fb3"
+                    )
+
+```
+
+```{r load seurat object, echo = FALSE, message=FALSE, warning=FALSE}
+
+seurat <- readRDS("~/integrated_seurat.rds")
+
+# reorder the samples in the metadata to appear in the order desired by us
+tf_levels <- factor(c("ETS1","NR3C1", "LEF1", "FOXQ1","GFP"))
+ct_levels <- factor(c(0,2,4,1,3,6,5))
+# generate color palette
+tf_col <- setNames(c("#5392CB", "#8966A9", "#E7572A", "#F7C630", "#8ABE55"), factor(tf_levels))
+ct_col <- setNames(c("#F7DC6F", "#F1C40F", "#DDB40D","#B7950B",  "#73C6B6", "#387569", "#B03A2E"), factor(ct_levels))
+
+show_col(prettyrainbow_colscheme(30))
+show_col(c("#F7DC6F", "#F1C40F", "#DDB40D", "#B7950B", "#73C6B6", "#387569", "#B03A2E"))
+
+```
+
+# Endothelial cells
+```{r EC only}
+
+Idents(seurat) <- "RNA_snn_res.0.2"
+
+ec <- subset(seurat, idents ="5")
+ec <- NormalizeData(ec) %>% 
+    FindVariableFeatures(nfeatures = 3000) %>%
+    ScaleData() %>%
+    RunPCA(npcs = 50)
+ec <- cluster_sim_spectrum(ec, label_tag = "orig.ident", cluster_resolution = 0.8)
+ec <- RunUMAP(ec, reduction="css", dims = 1:ncol(Embeddings(ec, "css")))
+ec <- FindNeighbors(ec, reduction = "css", dims = 1:ncol(Embeddings(ec, "css"))) %>%
+    FindClusters(resolution = 0.05) %>%
+    FindClusters(resolution = 0.1) %>%
+    FindClusters(resolution = 0.2) %>%
+    FindClusters(resolution = 0.3)
+
+# Save object
+saveRDS(ec, "~/integrated_seurat_ec.rds")
+
+```
+
+```{r umap EC visualizations}
+
+# define color palette
+ct_levels_ec <- factor(c(0,1,2,3,4))
+# generate color palette
+ct_col_ec <- setNames(c("#1F618D", "#138D75", "#F7DC6F", "#EE8176", "#B03A2E"), factor(ct_levels_ec))
+
+# by condition
+UMAPPlot(ec, group.by="orig.ident", cols = tf_col) & NoAxes()
+# by cluster
+UMAPPlot(ec, group.by="RNA_snn_res.0.2", cols = ct_col_ec) & NoAxes()
+
+plotMultiFeatures(Embeddings(ec, "umap"),
+                  ec@assays$RNA@data[c("PECAM1", "CLDN5", "MKI67", "COL1A1", "GJA1", "TJP1"),],
+                  ncol=3, colorPal=blue_colscheme, cex=0.8, par_cex = 0.8, mar = c(1,1,2,2), cex.main=2, sort_by_value=T)
+
+plotMultiFeatures(Embeddings(ec, "umap"),
+                   ec@assays$RNA@data[c("ANGPT2", "LBH", "MKI67", "TFPI2", "MMP9"),],
+                   ncol=3, colorPal=blue_colscheme, cex=0.8, par_cex = 0.8, mar = c(1,1,2,2), cex.main=2, sort_by_value=T)
+
+```
+
+```{r plot some markers in ECs}
+
+# By TF
+Idents(ec) <- "orig.ident"
+avg_expr_cl <- AverageExpression(ec, group.by = "orig.ident", assays = "RNA")$RNA
+
+## Markers from Cao et al and Roudnicky and general (see BBB_markers excel sheet)
+mat_norm <- apply(avg_expr_cl[ec_bbb_markers,], 1, function(x) (x-x[5])/(max(x,na.rm=T)-min(x,na.rm=T)))
+
+# Initiate cols with all black
+cols <- rep('black', ncol(mat_norm))
+# Select colors for genes
+  cols[colnames(mat_norm) %in% c("TJP1","TJP2","CLDN5","MARVELD2","OCLN")] <- "#177abd"
+  cols[colnames(mat_norm) %in% c("JAM2","JAM3","CDH5","PECAM1","ESAM")] <- "#0aa667"
+  cols[colnames(mat_norm) %in% c("GJA1","GJA5")] <- "#bfad0a"
+  cols[colnames(mat_norm) %in% c( "PLVAP", "MFSD2A","ABCA1","ABCA2","ABCB1","ABCG2","LEPR","TFRC","SLC1A1","SLC2A1","SLC2A3","SLC3A2","SLC5A3","SLC7A11","SLC16A1","SLC38A2","SLC38A3","SLC38A5","SLCO1A2")] <- "#ba5147"
+  cols[colnames(mat_norm) %in% c("MAOA", "AXIN1","AXIN2")] <- "#a44fb3"
+  
+    par(oma=c(1,2,1,1));  
+    gplots::heatmap.2(t(mat_norm),
+                  Rowv=T, Colv=F, dendrogram="row",main = "BBB marker gene expression in EC", 
+                  key = T, keysize=1.5, density.info = "none",scale = "none", trace="none",
+                  col = bluewhitered_colscheme(30), margins = c(5,8), cexRow = 1.5, cexCol = 1.5, colRow = cols)
+
+```
+
+
+DE analysis per cluster
+```{r find cluster markers of EC, message=FALSE, warning=FALSE}
+
+Idents(ec) <- "RNA_snn_res.0.2"
+
+cl_markers_ec <- FindAllMarkers(ec, min.pct = 0.25, logfc.threshold = log(0.1), only.pos = F)
+  
+top2_cl_markers_ec <- cl_markers_ec %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+top_cl_markers_ec <- cl_markers_ec %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top2_cl_markers_ec, "~/top2_cl_markers_ec.csv")
+write.csv(top_cl_markers_ec, "~/top_cl_markers_ec.csv")
+
+DotPlot(ec, group.by = "RNA_snn_res.0.2", features = rev(top2_cl_markers_ec$gene), cols = c("gray", "black")) + RotatedAxis() + coord_flip()
+
+```
+
+Perform GO of the DEGs
+```{r enrichR, fig.width=12, fig.height=2}
+
+databases <- listEnrichrDbs()
+databases <- databases[order(databases$libraryName),]
+databases$libraryName
+
+dbs <- c("GO_Biological_Process_2023")
+
+# Cluster 1
+top_cl_markers_ec_cl1.up <- top_cl_markers_ec_cl1 %>% filter(outcome == "Enriched")
+top_cl_markers_ec_cl1.up <- top_cl_markers_ec_cl1.up$gene
+top_cl_markers_ec_cl1.enriched <- enrichr(top_cl_markers_ec_cl1.up, dbs)
+
+# Cluster 4
+top_cl_markers_ec_cl4.up <- top_cl_markers_ec_cl4 %>% filter(outcome == "Enriched")
+top_cl_markers_ec_cl4.up <- top_cl_markers_ec_cl4.up$gene
+top_cl_markers_ec_cl4.enriched <- enrichr(top_cl_markers_ec_cl4.up, dbs)
+
+```
+
+```{r EC cluster marker GO terms clustering using rrvgo}
+
+go_analysis <- read.delim(system.file("extdata/example.txt", package="rrvgo"))
+
+## Cluster 1 top markers
+# Extract the GO IDs of the BP processes from the enriched genes
+de.cl1.go <- top_cl_markers_ec_cl1.enriched[[1]] %>% filter(Combined.Score > 300)
+terms_de.cl1.go <- de.cl1.go$Term
+terms_de.cl1.go <- stringr::str_extract(string = terms_de.cl1.go,
+                                               pattern = "(?<=\\().*(?=\\))")
+terms_de.cl1.go
+
+# Extract the scores as a named vector
+scores <- de.cl1.go$Combined.Score
+scores <- setNames(scores, terms_de.cl1.go)
+
+# Calculate the similarity matrix
+simMatrix <- calculateSimMatrix(terms_de.cl1.go,
+                                orgdb="org.Hs.eg.db",
+                                ont="BP",
+                                method="Rel")
+
+# Group terms based on similarity
+reducedTerms <- reduceSimMatrix(simMatrix,
+                                scores,
+                                threshold=0.5,
+                                orgdb="org.Hs.eg.db")
+
+# Use the package "treemap" to visualize
+pdf("~/bvo_cl1_top_markers_GO_clusters.pdf")
+treemap(reducedTerms,
+            index="parentTerm",
+            vSize="size",
+            type="index"
+            )
+dev.off()
+
+
+## Cluster 4 top markers
+# Extract the GO IDs of the BP processes from the enriched genes
+de.cl4.go <- top_cl_markers_ec_cl4.enriched[[1]] %>% filter(Combined.Score > 300)
+terms_de.cl4.go <- de.cl4.go$Term
+terms_de.cl4.go <- stringr::str_extract(string = terms_de.cl4.go,
+                                               pattern = "(?<=\\().*(?=\\))")
+terms_de.cl4.go
+
+# Extract the scores as a named vector
+scores <- de.cl4.go$Combined.Score
+scores <- setNames(scores, terms_de.cl4.go)
+
+# Calculate the similarity matrix
+simMatrix <- calculateSimMatrix(terms_de.cl4.go,
+                                orgdb="org.Hs.eg.db",
+                                ont="BP",
+                                method="Rel")
+
+# Group terms based on similarity
+\reducedTerms <- reduceSimMatrix(simMatrix,
+                                scores,
+                                threshold=0.5,
+                                orgdb="org.Hs.eg.db")
+
+# Use the package "treemap" to visualize
+pdf("~/bvo_cl4_top_markers_GO_clusters.pdf")
+treemap(reducedTerms,
+            index="parentTerm",
+            vSize="size",
+            type="index"
+            )
+dev.off()
+
+```
+
+
+DE analysis per TF
+```{r TF DE ECs}
+
+Idents(ec) <- "orig.ident"
+
+## LEF1
+lef1.de <- FindMarkers(ec, ident.1 = "LEF1", ident.2 = "GFP", logfc.threshold = 0, min.pct = 0.01, min.diff.pct = -Inf) 
+lef1.de$gene <- rownames(lef1.de)
+lef1.de <- lef1.de %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05, gene, NA)) %>%
+  mutate(TF = "LEF1")
+
+  lef1.de$p_val_adj[lef1.de$p_val_adj == 0.000000e+00] <- min(lef1.de$p_val_adj[which(lef1.de$p_val_adj != 0)])
+
+# Add to the table another column with outcome
+lef1.de <- lef1.de %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.05 ~ "Enriched",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.05  ~ "Depleted",
+                           TRUE ~ "Unchanged")
+    )
+
+# Remove RP and MT genes
+blacklist <- c(grep("^MT-", lef1.de$gene, value=T), read.table("~/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(lef1.de$gene, blacklist)
+lef1.de <- lef1.de %>% filter(gene %in% diff_genes)
+
+lef1.de.up <- lef1.de %>% 
+      filter(outcome == "Enriched")  %>%
+      arrange(desc(avg_log2FC), .by_group = TRUE)
+lef1.de.down <- lef1.de %>% filter(outcome == "Depleted") 
+
+# Save table with DEGs LEF1
+write.csv(lef1.de, "~/lef1.de.csv")
+
+
+## ETS1
+ets1.de <- FindMarkers(ec, ident.1 = "ETS1", ident.2 = "GFP", logfc.threshold = 0, min.pct = 0.01, min.diff.pct = -Inf) 
+ets1.de$gene <- rownames(ets1.de)
+ets1.de <- ets1.de %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05, gene, NA)) %>%
+  mutate(TF = "ETS1")
+
+  ets1.de$p_val_adj[ets1.de$p_val_adj == 0.000000e+00] <- min(ets1.de$p_val_adj[which(ets1.de$p_val_adj != 0)])
+
+# Remove RP and MT genes
+blacklist <- c(grep("^MT-", ets1.de$gene, value=T), read.table("~Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(ets1.de$gene, blacklist)
+ets1.de <- ets1.de %>% filter(gene %in% diff_genes)
+
+# Add to the table another column with outcome
+ets1.de <- ets1.de %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.05 ~ "Enriched",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.05  ~ "Depleted",
+                           TRUE ~ "Unchanged")
+    )
+
+ets1.de.up <- ets1.de %>% 
+      filter(outcome == "Enriched")  %>%
+      arrange(desc(avg_log2FC), .by_group = TRUE)
+ets1.de.down <- ets1.de %>% filter(outcome == "Depleted") 
+
+# Save table with DEGs ETS1
+write.csv(ets1.de, "~/ets1.de.csv")
+
+
+## FOXQ1
+foxq1.de <- FindMarkers(ec, ident.1 = "FOXQ1", ident.2 = "GFP", logfc.threshold = 0, min.pct = 0.01, min.diff.pct = -Inf) 
+foxq1.de$gene <- rownames(foxq1.de)
+foxq1.de <- foxq1.de %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05, gene, NA)) %>%
+  mutate(TF = "FOXQ1")
+
+  foxq1.de$p_val_adj[foxq1.de$p_val_adj == 0.000000e+00] <- min(foxq1.de$p_val_adj[which(foxq1.de$p_val_adj != 0)])
+
+# Remove RP and MT genes
+blacklist <- c(grep("^MT-", foxq1.de$gene, value=T), read.table("~/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(foxq1.de$gene, blacklist)
+foxq1.de <- foxq1.de %>% filter(gene %in% diff_genes)
+
+# Add to the table another column with outcome
+foxq1.de <- foxq1.de %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.05 ~ "Enriched",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.05  ~ "Depleted",
+                           TRUE ~ "Unchanged")
+    )
+
+foxq1.de.up <- foxq1.de %>% 
+      filter(outcome == "Enriched")  %>%
+      arrange(desc(avg_log2FC), .by_group = TRUE)
+foxq1.de.down <- foxq1.de %>% filter(outcome == "Depleted") 
+
+# Save table with DEGs FOXQ1
+write.csv(foxq1.de, "~/foxq1.de.csv")
+
+
+## NR3C1
+nr3c1.de <- FindMarkers(ec, ident.1 = "NR3C1", ident.2 = "GFP", logfc.threshold = 0, min.pct = 0.01, min.diff.pct = -Inf) 
+nr3c1.de$gene <- rownames(nr3c1.de)
+nr3c1.de <- nr3c1.de %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05, gene, NA)) %>%
+  mutate(TF = "NR3C1")
+
+  nr3c1.de$p_val_adj[nr3c1.de$p_val_adj == 0.000000e+00] <- min(nr3c1.de$p_val_adj[which(nr3c1.de$p_val_adj != 0)])
+  
+# Remove RP and MT genes
+blacklist <- c(grep("^MT-", nr3c1.de$gene, value=T), read.table("~/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(nr3c1.de$gene, blacklist)
+nr3c1.de <- nr3c1.de %>% filter(gene %in% diff_genes)
+
+# Add to the table another column with outcome
+nr3c1.de <- nr3c1.de %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.05 ~ "Enriched",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.05  ~ "Depleted",
+                           TRUE ~ "Unchanged")
+    )
+
+nr3c1.de.up <- nr3c1.de %>% 
+      filter(outcome == "Enriched")  %>%
+      arrange(desc(avg_log2FC), .by_group = TRUE)
+nr3c1.de.down <- nr3c1.de %>% filter(outcome == "Depleted") 
+
+# Save table with DEGs NR3C1
+write.csv(nr3c1.de, "~/nr3c1.de.csv")
+
+
+# Top 20 up
+top20_lef1.de.up <- lef1.de.up %>% slice_max(n = 20, order_by = avg_log2FC)
+top20_ets1.de.up <- ets1.de.up %>% slice_max(n = 20, order_by = avg_log2FC)
+top20_foxq1.de.up <- foxq1.de.up %>% slice_max(n = 20, order_by = avg_log2FC)
+top20_nr3c1.de.up <- nr3c1.de.up %>% slice_max(n = 20, order_by = avg_log2FC)
+
+# Top 20 down
+top20_lef1.de.down <- lef1.de.down %>% slice_min(n = 20, order_by = avg_log2FC)
+top20_ets1.de.down <- ets1.de.down %>% slice_min(n = 20, order_by = avg_log2FC)
+top20_foxq1.de.down <- foxq1.de.down %>% slice_min(n = 20, order_by = avg_log2FC)
+top20_nr3c1.de.down <- nr3c1.de.down %>% slice_min(n = 20, order_by = avg_log2FC)
+
+```
+
+```{r heatmap plot DE of TF to GFP in ECs all clusters}
+
+## Wrangle the data
+# Generate a table with the top 20 DE genes in tF OE to GFP ctrl
+top20_up <- rbind(top20_ets1.de.up, top20_nr3c1.de.up, top20_lef1.de.up, top20_foxq1.de.up)
+top20_up_down <- rbind(top20_ets1.de.up, top20_nr3c1.de.up, top20_lef1.de.up, top20_foxq1.de.up,top20_ets1.de.down, top20_nr3c1.de.down, top20_lef1.de.down, top20_foxq1.de.down)
+
+# Generate a table with all DE genes in TF OE to GFP ctrl
+de <- rbind(ets1.de, nr3c1.de, lef1.de, foxq1.de)
+# Select data for the top 10 genes for each TF but including data for the other TFs as well
+de_up <- de %>% filter(gene %in% top20_up$gene)
+de_up_down <- de %>% filter(gene %in% top20_up_down$gene)
+
+
+## Plot the DEGs as log2_fc
+top20_up_minimal <- dplyr::select(de_up,avg_log2FC,gene,TF)
+top20_up_minimal_reshaped <- reshape(top10_up_minimal, direction="wide", v.names="avg_log2FC", timevar="TF", 
+             idvar="gene")
+# Convert to a matrix
+mat <- data.matrix(top20_up_minimal_reshaped[,2:ncol(top20_up_minimal_reshaped)])
+
+  pdf("~/heatmap_top20_DE_up_TF_to_ctrl.pdf", width = 6, height = 16)
+    par(oma=c(1,2,1,1));
+    heatmap.2(mat, main = "avg_log2FC from control", Colv=T, Rowv = T, trace="none", scale="none", cex.main=0.5, cexRow=0.7, cexCol=0.7, col=bluewhitered_colscheme(30), key=T, keysize = 1.5, key.xlab="Log2FC to control", density.info = "none", margins=c(8,8)) 
+  dev.off()
+
+## Plot the DEGs as log2_fc
+top20_up_down_minimal <- dplyr::select(de_up_down,avg_log2FC,gene,TF)
+top20_up_down_minimal_reshaped <- reshape(top20_up_down_minimal, direction="wide", v.names="avg_log2FC", timevar="TF", 
+             idvar="gene")
+# Convert to a matrix
+mat <- data.matrix(top20_up_down_minimal_reshaped[,2:ncol(top20_up_down_minimal_reshaped)])
+
+  pdf("~/heatmap_top20_DE_up_down_TF_to_ctrl.pdf", width = 6, height = 24)
+    par(oma=c(1,2,1,1));  
+    heatmap.2(mat, main = "avg_log2FC from control", Colv=T, Rowv = T, trace="none", scale="none", cex.main=0.8, cexRow=0.7, cexCol=0.7, col=bluewhitered_colscheme(30), key=T, keysize = 1.5,key.xlab="Log2FC to control",  density.info = "none", margins=c(8,8)) 
+  dev.off()
+  
+```
+
+```{r volcano plot DE of TFs to GFP in ECs all clusters}
+
+pdf("~/lef1.de_volcano_DE.pdf", height = 5, width = 8)
+ggplot(lef1.de, aes(x = avg_log2FC, y = -log10(p_val_adj), label = DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(lef1.de, outcome == "Enriched" & avg_log2FC > log(1.2)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(lef1.de, outcome == "Depleted" & avg_log2FC < -log(1.2)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 30) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+
+```
+
+```{r GO of LEF1 OE vs GFP control}
+
+# Inspect up and down-regulated genes and select top ones to check their GO terms
+lef1.de %>% arrange(avg_log2FC)
+lef1.de %>% arrange(desc(avg_log2FC))
+
+# Set timeout to a high number
+options(timeout = 6000000)
+# show all elements of the data.frame
+options(tibble.print_max = Inf)
+# search for GO terms of an example Homo sapiens gene
+GO_tbl_lef1.up <- biomartr::getGO(organism = "Homo sapiens", 
+                          genes    = c("BST2","CARTPT","MMP9","CRABP1","MDK", "COL3A1", "VAMP8","DKK1", "IGDCC3","ARGLU1","TNFSF10","IFITM3","ACSM3","DAB2","MEST","GIMAP4","TEK","CLDN5","RPL22L1","FOS","SDCBP","IGFBP7","ATP5MC2","GPC3","TPM1","SELENOP","TIMP3","SLC7A8","PHGDH"),
+                          filters  = "hgnc_symbol")
+
+GO_tbl_lef1.down <- biomartr::getGO(organism = "Homo sapiens", 
+                          genes    = c("ANGPT2","CCND1","EMP1","ESM1","CD34","ITGA2","NEAT1","HECW2","AKAP12","THBS1","UNC5B-AS1","PLXNA2","TM4SF18","ITGA1","MMP1","EDN1","TSPAN13","SORBS2","TCF4","CD59","TCIM","SGK1","NUAK1","SLC12A2","KITLG","PODXL"),
+                          filters  = "hgnc_symbol")
+
+# Inspect GO terms that come up often and their genes
+GO_tbl_lef1.up %>% group_by(goslim_goa_description,hgnc_symbol) %>% summarise()
+GO_tbl_lef1.down %>% group_by(goslim_goa_description,hgnc_symbol) %>% summarise()
+
+# Make groups of the top DEGs as some of their GO terms
+# cell adhesion/motility 	ANGPT2, CD34, ITGA1, ITGA2, KITLG, NUAK1, PLXNA2, PODXL, CLDN5, COL3A1, DAB2, IGDCC3, IGFBP7, MDK, TEK, TPM1, AKAP12 - "#1386d4"
+cell_adhesion <- c("ANGPT2", "CD34", "ITGA1", "ITGA2", "KITLG", "NUAK1", "PLXNA2", "PODXL", "CLDN5", "COL3A1", "DAB2", "IGDCC3", "IGFBP7", "MDK", "TEK", "TPM1", "AKAP12")
+# cytoplasmic vesicle	CD59, EDN1, BST2, CARTPT, DAB2, DKK1, IFITM3, SELENOP, TIMP3, VAMP8 - "#0abf76"
+cytoplasmic_vesicle <- c("CD59", "BST2", "CARTPT",  "DKK1", "IFITM3", "SELENOP", "TIMP3", "VAMP8")
+# lipid binding	SGK1, THBS1, ATP5MC2, CRABP1, SDCBP - "#bfad0a"
+lipid_binding <- c("SGK1", "THBS1", "ATP5MC2", "CRABP1", "SDCBP")
+# mitotic cell cycle CCND1, HECW2 - "#ba5147"
+mitotic_cell_cycle <- c("CCND1", "HECW2")
+# transmembrane transport	SLC12A2, TSPAN13 - "#a44fb3"
+transmembrane_transport <- c("SLC12A2", "TSPAN13")
+# catalytic activity	ACSM3, MEST, MMP9 - "#e39402"
+catalytic_activity <- c("ACSM3", "MEST", "MMP9","PHGDH")
+# others - "black"
+others <- c("EDN1","ESM1","NEAT1","TCF4","UNC5B-AS", "TM4SF18","EMP1","ARGLU1","TNFSF10")
+
+# Filter gene names of the genes we want to label
+genes_to_label <- lef1.de %>% filter(DEG %in% c(cell_adhesion, cytoplasmic_vesicle, lipid_binding, mitotic_cell_cycle, transmembrane_transport, catalytic_activity, others))
+  cell_adhesion.cols <- lef1.de %>% filter(DEG %in% cell_adhesion)
+  cytoplasmic_vesicle.cols <- lef1.de %>% filter(DEG %in% cytoplasmic_vesicle)
+  lipid_binding.cols <- lef1.de %>% filter(DEG %in% lipid_binding)
+  mitotic_cell_cycle.cols <- lef1.de %>% filter(DEG %in% mitotic_cell_cycle)
+  transmembrane_transport.cols <- lef1.de %>% filter(DEG %in% transmembrane_transport)
+  catalytic_activity.cols <- lef1.de %>% filter(DEG %in% catalytic_activity)
+  others.cols <- lef1.de %>% filter(DEG %in% others)
+   
+# Save plot
+pdf("~/lef1.de_volcano_DE_GO_labels.pdf", height = 5, width = 8)
+ggplot(lef1.de, aes(x = avg_log2FC, y = -log10(p_val_adj), label = DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(lef1.de, outcome == "Enriched" & avg_log2FC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(lef1.de, outcome == "Depleted" & avg_log2FC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_point(data = filter(lef1.de, DEG %in% cell_adhesion), size = 2,shape = 21,fill = "#1386d4",colour = "#1386d4") +
+  geom_point(data = filter(lef1.de, DEG %in% cytoplasmic_vesicle), size = 2,shape = 21,fill = "#0abf76",colour = "#0abf76") +
+  geom_point(data = filter(lef1.de, DEG %in% lipid_binding), size = 2,shape = 21,fill = "#bfad0a",colour = "#bfad0a") +
+  geom_point(data = filter(lef1.de, DEG %in% mitotic_cell_cycle), size = 2,shape = 21,fill = "#ba5147",colour = "#ba5147") +
+  geom_point(data = filter(lef1.de, DEG %in% transmembrane_transport), size = 2,shape = 21,fill = "#a44fb3",colour = "#a44fb3") +
+  geom_point(data = filter(lef1.de, DEG %in% catalytic_activity), size = 2,shape = 21,fill = "#e39402",colour = "#e39402") +
+  geom_text_repel(data = cell_adhesion.cols, mapping = aes(avg_log2FC, -log10(p_val_adj), label = DEG), size = 3, max.overlaps = 50, colour = "#1386d4") +
+  geom_text_repel(data = cytoplasmic_vesicle.cols, mapping = aes(avg_log2FC, -log10(p_val_adj), label = DEG), size = 3, max.overlaps = 50, colour = "#0abf76") +
+  geom_text_repel(data = lipid_binding.cols, mapping = aes(avg_log2FC, -log10(p_val_adj), label = DEG), size = 3, max.overlaps = 50, colour = "#bfad0a") +
+  geom_text_repel(data = mitotic_cell_cycle.cols, mapping = aes(avg_log2FC, -log10(p_val_adj), label = DEG), size = 3, max.overlaps = 50, colour = "#ba5147") +
+  geom_text_repel(data = transmembrane_transport.cols, mapping = aes(avg_log2FC, -log10(p_val_adj), label = DEG), size = 3, max.overlaps = 50, colour = "#a44fb3") +
+  geom_text_repel(data = catalytic_activity.cols, mapping = aes(avg_log2FC, -log10(p_val_adj), label = DEG), size = 3, max.overlaps = 50, colour = "#e39402") +
+  geom_text_repel(data = others.cols, mapping = aes(avg_log2FC, -log10(p_val_adj), label = DEG), size = 3, max.overlaps = 50, colour = "black") +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) + 
+  ggtitle("LEF1 to control DEGs")
+dev.off()
+
+```
+
+```{r create a table with no. DEGs per TF vs GFP in ECs all clusters}
+
+list_DE_EC_tables <- list(ets1.de, nr3c1.de, lef1.de, foxq1.de)
+
+no.DEGs <- matrix(c("ets1.de", "nr3c1.de", "lef1.de","foxq1.de"), ncol=1, byrow=TRUE)
+no.DEGs <- as.data.frame(no.DEGs)
+colnames(no.DEGs) <- c("TF")
+
+no.up <- c()
+no.down <- c()
+for (i in list_DE_EC_tables) {
+  no.up <- rbind(no.up, sum(i$outcome == "Enriched"))
+  no.down <- rbind(no.down, sum(i$outcome ==  "Depleted"))
+}
+
+no.DEGs$no.up <- no.up
+no.DEGs$no.down <- no.down
+no.DEGs$sum <- no.DEGs$no.up + no.DEGs$no.down
+
+no.DEGs$TF <- factor(no.DEGs$TF,levels = c("ets1.de", "nr3c1.de", "lef1.de","foxq1.de"))
+
+
+pdf("~/lollipop_DEGs_EC_per_TF.pdf", height = 3, width = 3.5)
+ggplot(no.DEGs, aes(x = TF, y = sum)) +
+  geom_segment(aes(x = TF, xend = TF, y = 0, yend = sum), col = tf_col[-5]) +
+  geom_point(aes(x=TF, y=sum), size = 8, col = tf_col[-5]) +
+  geom_text(aes(x=TF,  y=sum, label = sum), color = "black", size = 3) +
+  theme_classic() +
+  xlab("TF") + 
+  ylab("Number of DEGs") +
+  ylim(0, 1500) +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+```
+
+Plot proportions of cells per cluster and protocol.
+```{r save plots of cell proportions, message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
+
+DefaultAssay(ec) <- "RNA"
+
+# create a dataset of all cells
+cl_tf <- as.data.frame(table(ec$RNA_snn_res.0.2, ec$orig.ident))
+
+colnames(cl_tf)[which(names(cl_tf) == "Var1")] <- "Cluster"
+colnames(cl_tf)[which(names(cl_tf) == "Var2")] <- "TF"
+
+# Stacked condition per cluster
+b <- ggplot(cl_tf, aes(fill=TF, y=Freq, x=Cluster)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cluster") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values=tf_col) +
+   theme(plot.title = element_text(size=16), axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) +
+   ggtitle("Proportion of cells from clusters per TF condition")
+pdf("~/prop_TF_per_cluster_ec.pdf",  width = 7, height = 7)
+b
+dev.off()
+
+# Stacked cluster per condition
+c <- ggplot(cl_tf, aes(fill=Cluster, y=Freq, x=TF)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cell line") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values= ct_col_ec) +
+   theme(plot.title = element_text(size=16), axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) +   
+  ggtitle("Proportion of cells from TF condition per cluster")
+pdf("~/prop_cluster_per_TF_ec.pdf",  width = 7, height = 7)
+c
+dev.off()
+
+```
+
+Enrichment analysis per TF
+```{r GO analysis per condition in endothelial cells}
+
+# Find marker genes for the reference and for the query data sets 
+DE_wilcoxauc_ec <- wilcoxauc(ec, group_by = "orig.ident") %>%
+  mutate(DE = abs(logFC)>log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55, feature, NA))
+
+  DE_wilcoxauc_ec$padj[DE_wilcoxauc_ec$padj == 0.000000e+00] <- min(DE_wilcoxauc_ec$padj[which(DE_wilcoxauc_ec$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_ec <- DE_wilcoxauc_ec %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55 ~ "Enriched",
+                           logFC < -log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55 ~ "Depleted",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_ec) 
+
+write.csv(DE_wilcoxauc_ec, "~/DE_wilcoxauc_ec_per_condition.csv")
+table(seurat$celltype, seurat$orig.ident)
+
+```
+
+# Mural cells only
+
+```{r separate mural cells, message=FALSE, warning=FALSE}
+
+Idents(seurat) <- "RNA_snn_res.0.2"
+
+mural <- subset(seurat, idents = c("0","1","2","3","4","6"))
+mural <- NormalizeData(mural) %>% 
+    FindVariableFeatures(nfeatures = 3000) %>%
+    ScaleData() %>%
+    RunPCA(npcs = 50)
+mural <- cluster_sim_spectrum(mural, label_tag = "orig.ident", cluster_resolution = 0.5)
+mural <- RunUMAP(mural, reduction="css", dims = 1:ncol(Embeddings(mural, "css")))
+mural <- FindNeighbors(mural, reduction = "css", dims = 1:ncol(Embeddings(mural, "css"))) %>%
+    FindClusters(resolution = 0.1) %>%
+    FindClusters(resolution = 0.2) %>%
+    FindClusters(resolution = 0.3)
+Idents(mural) <- "orig.ident"
+
+DimPlot(mural, reduction = "umap", group.by = "RNA_snn_res.0.2", split.by = "orig.ident")
+DimPlot(mural, reduction = "umap", group.by = "orig.ident")
+
+# Save object
+saveRDS(mural, "~/integrated_seurat_mural.rds")
+
+```
+
+DE analysis per cluster
+```{r find cluster markers of mural cells, message=FALSE, warning=FALSE}
+
+Idents(mural) <- "RNA_snn_res.0.2"
+
+cl_markers_mural <- FindAllMarkers(mural, min.pct = 0.25, logfc.threshold = log(0.1), only.pos = F)
+
+top2_cl_markers_mural <- cl_markers_mural %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+top_cl_markers_mural <- cl_markers_mural %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top2_cl_markers_mural, "~/top2_cl_markers_mural.csv")
+write.csv(top_cl_markers_mural, "~/top_cl_markers_mural.csv")
+
+# Remove genes coding for mitochondria and ribosome proteins
+blacklist <- c(grep("^MT-", top_cl_markers_mural$gene, value=T), read.table("~/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(top_cl_markers_mural$gene,blacklist)
+top_cl_markers_mural <- top_cl_markers_mural %>% filter(gene %in% diff_genes)
+
+```
+
+```{r plot mural cell cluster markers}
+
+    pdf("~/dotplot_scaled_top2_markers_cl_mural_res.0.2.pdf", width = 4.7, height = 3.2)
+DotPlot(mural, group.by = "RNA_snn_res.0.2", features = rev(top2_cl_markers_mural$gene), cols = c("gray", "black")) + RotatedAxis() + coord_flip()
+  dev.off()
+
+```
+
+```{r umap mural visualizations}
+
+# define color palette
+ct_levels_mural <- factor(c(0,1,2,3,4,5))
+# generate color palette
+ct_col_mural <- setNames(c("#1F618D", "#138D75", "#F7DC6F", "#EE8176", "#B03A2E","#9D2EB0"), factor(ct_levels_mural))
+
+# by condition
+UMAPPlot(mural, group.by="orig.ident", cols = tf_col) & NoAxes()
+# by cluster
+UMAPPlot(mural, group.by="RNA_snn_res.0.2", cols = ct_col_mural) & NoAxes()
+
+png("~/feature_plots_mural_cluster_markers_brain.png", height=32, width=20, unit="cm", res=500)
+plotMultiFeatures(Embeddings(mural, "umap"),
+                  mural@assays$RNA@data[c(mc_markers),],
+                  ncol=3, colorPal=blue_colscheme, cex=0.8, par_cex = 0.8, mar = c(1,1,2,2), cex.main=2, sort_by_value=T)
+dev.off()
+
+```
+DE analysis per TF
+
+```{r mural LEF1 to GFP DE enrichment, fig.width=14, fig.height=8}
+
+lef1.de.mural.enriched <- lef1.de.mural.up %>% filter(avg_log2FC > log(1.1))
+lef1.de.mural.enriched <- lef1.de.mural.enriched$gene 
+lef1.de.mural.enriched <- enrichr(lef1.de.mural.enriched, dbs)
+plot_enrichR_lef1.mural.up <- plotEnrich(lef1.de.mural.enriched[[1]], showTerms = 40, numChar = 40, y = "Count", orderBy = "P.value", title = "GO_Biological_Process_2023 lef1.de.mural.enriched") + scale_fill_gradient(high = "#C0C0C0", low = "black") + theme_classic() |
+plotEnrich(lef1.de.mural.enriched[[2]], showTerms = 40, numChar = 40, y = "Count", orderBy = "P.value", title = "GO_Cellular_Component_2023 lef1.de.mural.enriched")+ scale_fill_gradient(high = "#C0C0C0", low = "black") + theme_classic() |
+plotEnrich(lef1.de.mural.enriched[[3]], showTerms = 40, numChar = 40, y = "Count", orderBy = "P.value", title = "GO_Molecular_Function_2023 lef1.de.mural.enriched") + scale_fill_gradient(high = "#C0C0C0", low = "black") + theme_classic()
+plot_enrichR_lef1.mural.up
+
+
+lef1.de.mural.depleted <- lef1.de.mural.down %>% filter(avg_log2FC < -log(1.1))
+lef1.de.mural.depleted <- lef1.de.mural.depleted$gene 
+lef1.de.mural.depleted <- enrichr(lef1.de.mural.depleted, dbs)
+plot_enrichR_lef1.mural.down <- plotEnrich(lef1.de.mural.depleted[[1]], showTerms = 40, numChar = 40, y = "Count", orderBy = "P.value", title = "GO_Biological_Process_2023 lef1.de.mural.depleted") + scale_fill_gradient(high = "#C0C0C0", low = "black") + theme_classic() |
+plotEnrich(lef1.de.mural.depleted[[2]], showTerms = 40, numChar = 40, y = "Count", orderBy = "P.value", title = "GO_Cellular_Component_2023 lef1.de.mural.depleted")+ scale_fill_gradient(high = "#C0C0C0", low = "black") + theme_classic() |
+plotEnrich(lef1.de.mural.depleted[[3]], showTerms = 40, numChar = 40, y = "Count", orderBy = "P.value", title = "GO_Molecular_Function_2023 lef1.de.mural.depleted") + scale_fill_gradient(high = "#C0C0C0", low = "black") + theme_classic()
+plot_enrichR_lef1.mural.down
+
+```
+
+```{r select top mural cell markers per cluster}
+
+top_cl_markers_mural <- top_cl_markers_mural %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.01 ~ "Enriched",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.01 ~ "Depleted",
+                           TRUE ~ "Unchanged")
+    )
+
+top_cl_markers_mural_cl1 <- top_cl_markers_mural %>% filter(cluster == "1")
+top_cl_markers_mural_cl3 <- top_cl_markers_mural %>% filter(cluster == "3")
+
+```
+
+
+Perform GO of the DEGs of mural cell clusters
+```{r enrichR mural cells, fig.width=12, fig.height=2}
+
+# Cluster 1
+top_cl_markers_mural_cl1.up <- top_cl_markers_mural_cl1 %>% filter(outcome == "Enriched")
+top_cl_markers_mural_cl1.up <- top_cl_markers_mural_cl1.up$gene
+top_cl_markers_mural_cl1.enriched <- enrichr(top_cl_markers_mural_cl1.up, dbs)
+
+# Cluster 3
+top_cl_markers_mural_cl3.up <- top_cl_markers_mural_cl3 %>% filter(outcome == "Enriched")
+top_cl_markers_mural_cl3.up <- top_cl_markers_mural_cl3.up$gene
+top_cl_markers_mural_cl3.enriched <- enrichr(top_cl_markers_mural_cl3.up, dbs)
+
+```
+
+
+```{r mural cell cluster marker GO terms clustering}
+
+go_analysis <- read.delim(system.file("extdata/example.txt", package="rrvgo"))
+
+## Cluster 1 top markers
+# Extract the GO IDs of the BP processes from the enriched genes
+de.cl1.go <- top_cl_markers_mural_cl1.enriched[[1]] %>% filter(Combined.Score > 300)
+terms_de.cl1.go <- de.cl1.go$Term
+terms_de.cl1.go <- stringr::str_extract(string = terms_de.cl1.go,
+                                               pattern = "(?<=\\().*(?=\\))")
+
+# Extract the scores as a named vector
+scores <- de.cl1.go$Combined.Score
+scores <- setNames(scores, terms_de.cl1.go)
+
+# Calculate the similarity matrix
+simMatrix <- calculateSimMatrix(terms_de.cl1.go,
+                                orgdb="org.Hs.eg.db",
+                                ont="BP",
+                                method="Rel")
+
+# Group terms based on similarity
+reducedTerms <- reduceSimMatrix(simMatrix,
+                                scores,
+                                threshold=0.5,
+                                orgdb="org.Hs.eg.db")
+
+pdf("~/bvo_cl1_mural_top_markers_GO_clusters.pdf")
+treemap(reducedTerms,
+            index="parentTerm",
+            vSize="size",
+            type="index"
+            )
+dev.off()
+
+
+## Cluster 3 top markers
+# Extract the GO IDs of the BP processes from the enriched genes
+de.cl3.go <- top_cl_markers_mural_cl3.enriched[[1]] %>% filter(Combined.Score > 300)
+terms_de.cl3.go <- de.cl3.go$Term
+terms_de.cl3.go <- stringr::str_extract(string = terms_de.cl3.go,
+                                               pattern = "(?<=\\().*(?=\\))")
+
+# Extract the scores as a named vector
+scores <- de.cl3.go$Combined.Score
+scores <- setNames(scores, terms_de.cl3.go)
+
+# Calculate the similarity matrix
+simMatrix <- calculateSimMatrix(terms_de.cl3.go,
+                                orgdb="org.Hs.eg.db",
+                                ont="BP",
+                                method="Rel")
+
+# Group terms based on similarity
+reducedTerms <- reduceSimMatrix(simMatrix,
+                                scores,
+                                threshold=0.5,
+                                orgdb="org.Hs.eg.db")
+
+pdf("~/bvo_cl3_mural_top_markers_GO_clusters.pdf",width = 6,height = 4)
+treemap(reducedTerms,
+            index="parentTerm",
+            vSize="size",
+            type="index"
+            )
+dev.off()
+
+```
+
+
+# Load HTO data
+```{r}
+
+hto_endo <- readRDS(file="~/seurat.endothelial.rds")
+
+```
+
+```{r plot some markers in ECs of HTOs and TFs datasets, fig.height=6, fig.width=8}
+
+# By TF
+avg_expr_tf <- AverageExpression(ec, group.by = "orig.ident", assays = "RNA")$RNA
+
+## Markers from Cao et al and Roudnicky and general (see BBB_markers excel sheet)
+mat_norm_tf <- apply(avg_expr_tf[ec_bbb_markers,], 1, function(x) (x-x[5])/(max(x,na.rm=T)-min(x,na.rm=T)))
+
+# Initiate cols with all black
+cols <- rep('black', ncol(mat_norm))
+# Select colors for genes
+  cols[colnames(mat_norm) %in% c("TJP1","TJP2","CLDN5","MARVELD2","OCLN")] <- "#177abd"
+  cols[colnames(mat_norm) %in% c("JAM2","JAM3","CDH5","PECAM1","ESAM")] <- "#0aa667"
+  cols[colnames(mat_norm) %in% c("GJA1","GJA5")] <- "#bfad0a"
+  cols[colnames(mat_norm) %in% c( "PLVAP", "MFSD2A","ABCA1","ABCA2","ABCB1","ABCG2","LEPR","TFRC","SLC1A1","SLC2A1","SLC2A3","SLC3A2","SLC5A3","SLC7A11","SLC16A1","SLC38A2","SLC38A3","SLC38A5","SLCO1A2")] <- "#ba5147"
+  cols[colnames(mat_norm) %in% c("MAOA", "AXIN1","AXIN2")] <- "#a44fb3"
+  
+  pdf("~/heatmap_ec_bbb_markers_per_TF_ordered_in_ec.pdf", width = 5, height = 18)
+    par(oma=c(1,2,1,1));  
+    gplots::heatmap.2(t(mat_norm_tf),
+                  Rowv=F, Colv=F, dendrogram="row",main = "BBB marker gene expression in EC",
+                  key = T, keysize=1.5, density.info = "none",scale = "none", trace="none",
+                  col = bluewhitered_colscheme(30), margins = c(5,8), cexRow = 1.5, cexCol = 1.5, colRow = cols)
+  dev.off()
+   
+# Gene expression of brain-enriched TFs in the small molecule treated BVOs
+mat_norm_hto_tfs <- apply(avg_expr_hto[c("ETS1","NR3C1","LEF1","FOXQ1"),], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+
+pdf("~/heatmap_scaled_cao_org_TFs.pdf")
+heatmap.2(t(mat_norm_hto_tfs), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+

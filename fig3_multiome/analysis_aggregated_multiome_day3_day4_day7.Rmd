@@ -1,0 +1,1952 @@
+---
+title: "Multiome day 3, 4 and 7"
+author: "Marina Nikolova"
+date: "2023-02-13"
+output: html_document
+---
+
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwd () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/")
+
+```
+
+Load packages
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(Signac)
+library(harmony)
+library(simspec)
+library(SeuratWrappers)
+library(dplyr)
+library(simspec)
+library(rGREAT)
+library(Matrix)
+library(tidyr)
+library(Pando)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(ggraph)
+library(tidygraph)
+library(tidyverse)
+library(igraph)
+library(TFBSTools)
+library(JASPAR2020)
+library(presto)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+source("/links/groups/treutlein/USERS/zhisong_he/Tools/scripts/atac_annotation.r")
+
+bluered_colscheme <- colorRampPalette(rev(c("#d73027","#f46d43","#fdae61","#fee090","#e0f3f8","#abd9e9","#74add1","#4575b4")))
+
+```
+Load object
+```{r load object}
+
+seurat <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/aggr.seurat.rds")
+VlnPlot(seurat, features = c("nFeature_RNA","percent.mt","nFeature_ATAC","nucleosome_signal","TSS.enrichment"), pt.size = 0, group.by = "sample", ncol = 5) /
+  VlnPlot(seurat, features = c("nFeature_RNA","percent.mt","nFeature_ATAC","nucleosome_signal","TSS.enrichment"), pt.size = 0, group.by = "sample", ncol = 5, log = T)
+
+```
+
+```{r QC}
+
+# QC
+seurat <- subset(seurat,
+                 subset = nFeature_RNA > 1000 &
+                   nFeature_RNA < 10000 &
+                   percent.mt < 30 &
+                   nFeature_ATAC > 1000 &
+                   ((sample == "H9_day3" &
+                       nFeature_ATAC < 50000) |
+                      (sample != "H9_day3" &
+                         nFeature_ATAC < 30000)) &
+                   TSS.enrichment > 1 &
+                   nucleosome_signal < 2
+)
+                 
+VlnPlot(seurat, features = c("nFeature_RNA","percent.mt","nFeature_ATAC","nucleosome_signal","TSS.enrichment"), pt.size = 0, group.by = "sample", ncol = 5) /
+  VlnPlot(seurat, features = c("nFeature_RNA","percent.mt","nFeature_ATAC","nucleosome_signal","TSS.enrichment"), pt.size = 0, group.by = "sample", ncol = 5, log = T)
+
+```
+
+
+# Seurat preprocessing
+```{r preprocessing}
+
+# RNA assay
+DefaultAssay(seurat) <- "RNA"
+seurat <- NormalizeData(seurat) %>%
+  FindVariableFeatures(nfeatures = 3000)
+blacklist <- c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(seurat), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+VariableFeatures(seurat) <- setdiff(VariableFeatures(seurat), blacklist)
+
+seurat <- CellCycleScoring(seurat, g2m.features = cc.genes.updated.2019$g2m.genes, s.features = cc.genes.updated.2019$s.genes)
+seurat <- ScaleData(seurat, vars.to.regress = c("S.Score","G2M.Score"))
+seurat <- RunPCA(seurat, npcs = 50, verbose = F) %>%
+  RunUMAP(dims = 1:20, assay = "RNA")
+
+```
+
+```{r visualise preprocessed seurat}
+
+p1 <- UMAPPlot(seurat, group.by = "sample") & NoAxes()
+p2 <- FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), cols = beach_colscheme(30), order = T) & NoAxes() & NoLegend()
+p1 | p2
+
+```
+
+```{r RNA assay integration}
+
+regress_out_from_embeddings.default <- function(object,
+                                                vars)
+{
+  if (requireNamespace("pbapply", quietly = T)){
+    apply <- pbapply::pbapply
+  }
+  
+  emb <- apply(object, 2, function(x){
+    dat <- data.frame(x_ = x, vars)
+    residuals(lm(x_ ~ ., data = dat))
+  })
+  colnames(emb) <- colnames(object)
+  return(emb)
+}
+
+#'@param reduction Name of the reduction object to use
+#'@param vars_to_regress Variables in the meta.data slot for regressing out
+#'@param reduction.name Name of the new reduction object
+#'@param reduction,key Key of the returned reduction
+#'
+#'@rdname regress_out_from_embeddings
+#'@export
+#'@method regress_out_from_embeddings Seurat
+regress_out_from_embeddings <- function(object,
+                                               reduction,
+                                               vars_to_regress,
+                                               reduction.name = reduction,
+                                               reduction.key = NULL)
+{
+  emb <- Embeddings(object, reduction)
+  vars <- setNames(data.frame(object@meta.data[,vars_to_regress],
+                              row.names = colnames(object)),
+                   vars_to_regress)
+  emb_new <- regress_out_from_embeddings.default(object = emb,
+                                                 vars = vars)
+  colnames(emb_new) <- NULL
+  object[[reduction.name]] <- CreateDimReducObject(emb_new, key = reduction.key, assay = object[[reduction]]@assay.used)
+  return(object)
+}
+
+# CSS
+seurat <- cluster_sim_spectrum(seurat, label_tag = "sample", cluster_resolution = 1, reduction.name = "rna_css", reduction.key = "RNACSS_") %>%
+  run_PCA(reduction = "rna_css", npcs = 20, reduction.name = "rna_csspca", reduction.key = "RNACSSPCA_") %>%
+  regress_out_from_embeddings(reduction = "rna_csspca", vars_to_regress = c("G2M.Score","S.Score"), reduction.name = "rna_csspcacc", reduction.key = "RNACSSPCACC_")
+seurat <- RunUMAP(seurat, reduction = "rna_csspcacc", dims = 1:20, reduction.name = "rna_umap_css", reduction.key = "RNAUMAPCSS_")
+p1 <- DimPlot(seurat, group.by = "sample", reduction = "rna_umap_css") & NoAxes()
+p2 <- FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), cols = beach_colscheme(30), order = T, reduction = "rna_umap_css") & NoAxes() & NoLegend()
+p1 | p2
+
+p1 <- DimPlot(seurat, group.by = "sample", reduction = "rna_umap_css") & NoAxes()
+p2 <- FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), cols = beach_colscheme(30), order = T, reduction = "rna_umap_css") & NoAxes() & NoLegend()
+p1 | p2
+
+# Harmony
+seurat <- RunHarmony(seurat, group.by.vars = "sample", dims.use = 1:20, max.iter.harmony = 20, reduction.save = "rna_harmony")
+seurat <- RunUMAP(seurat, reduction = "rna_harmony", dims = 1:20, reduction.name = "rna_umap_harmony", reduction.key = "RNAUMAPHARMONY_")
+p1 <- DimPlot(seurat, group.by = "sample", reduction = "rna_umap_harmony") & NoAxes()
+p2 <- FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), cols = beach_colscheme(30), order = T, reduction = "rna_umap_harmony") & NoAxes() & NoLegend()
+p1 | p2
+
+# MNN
+seurat_mnn <- lapply(SplitObject(seurat, split.by = "sample"), function(x){
+  DietSeurat(x, assays = "RNA") %>%
+    FindVariableFeatures(nfeatures = 3000)
+})
+seurat_mnn <- RunFastMNN(seurat_mnn)
+seurat[['rna_mnn']] <- CreateDimReducObject(Embeddings(seurat_mnn, "mnn")[colnames(seurat),], key = "RNAMNN_", assay = "RNA")
+seurat <- RunUMAP(seurat, reduction = "rna_mnn", dims = 1:20, reduction.name = "rna_umap_mnn", reduction.key = "RNAUMAPMNN_")
+p1 <- DimPlot(seurat, group.by = "sample", reduction = "rna_umap_mnn") & NoAxes()
+p2 <- FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), cols = beach_colscheme(30), order = T, reduction = "rna_umap_mnn") & NoAxes() & NoLegend()
+p1 | p2
+
+# # CCA
+# seurat.list <- SplitObject(seurat, split.by = "sample")
+# seurat.list <- lapply(X = seurat.list, FUN = function(x) {
+#     x <- NormalizeData(x)
+#     x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+# })
+# features <- SelectIntegrationFeatures(object.list = seurat.list)
+# seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, anchor.features = features)
+# seurat.combined <- IntegrateData(anchorset = seurat.anchors)
+# DefaultAssay(seurat.combined) <- "integrated"
+# seurat.combined <- ScaleData(seurat.combined, verbose = FALSE)
+# seurat.combined <- RunPCA(seurat.combined, npcs = 30, verbose = FALSE)
+# seurat.combined <- RunUMAP(seurat.combined, reduction = "pca", dims = 1:30)
+# seurat.combined <- FindNeighbors(seurat.combined, reduction = "pca", dims = 1:30)
+# seurat.combined <- FindClusters(seurat.combined, resolution = 0.5)
+# # Visualization
+# p1 <- DimPlot(seurat.combined, reduction = "umap", split.by = "sample", group.by = "sample")
+# p2 <- DimPlot(seurat.combined, reduction = "umap", label = TRUE, repel = TRUE)
+# p1 + p2
+
+# Explore all 4 options to choose which integration to use further
+# DimPlot(seurat.combined, reduction = "umap", split.by = "sample", group.by = "sample")
+DimPlot(seurat, reduction = "rna_umap_css", group.by = "sample")
+DimPlot(seurat, reduction = "rna_umap_harmony", group.by = "sample")
+DimPlot(seurat, reduction = "rna_umap_mnn",  group.by = "sample")
+# Harmony seems best for these datasets
+
+```
+
+```{r save object with only RNA}
+
+# saveRDS(seurat, file = "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/data_processed.seurat.rds")
+
+write.csv(VariableFeatures(seurat), "Plots/variable_featires.csv")
+
+```
+
+```{r ATAC assay integration}
+
+# ATAC assay
+DefaultAssay(seurat) <- "peaks"
+seurat <- FindTopFeatures(seurat, min.cutoff = 1000) %>%
+  RunTFIDF()
+seurat <- RunSVD(seurat, n = 50)
+seurat <- RunUMAP(seurat, reduction = "lsi", dims = 2:30, assay = "peaks")
+p1 <- UMAPPlot(seurat, group.by = "sample") & NoAxes()
+DefaultAssay(seurat) <- "RNA"
+p2 <- FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), cols = beach_colscheme(30), order = T, reduction = "umap") & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "peaks"
+p1 | p2
+
+# integration on ATAC assay
+# CSS
+seurat <- cluster_sim_spectrum(seurat, label_tag = "sample", use_dr = "pca", dims_use = 1:20, cluster_resolution = 0.5, corr_method = "pearson", spectrum_type = "corr_ztransform", reduction.name = "peaks_css", reduction.key = "peaksCSS_") %>%
+  run_PCA(reduction = "peaks_css", npcs = 20, reduction.name = "peaks_csspca", reduction.key = "peaksCCSSPCA_")
+seurat <- RunUMAP(seurat, reduction = "peaks_csspca", dims = 1:10, reduction.name = "peaks_umap_css", reduction.key = "peaksUMAPCSS_")
+p1 <- DimPlot(seurat, group.by = "sample", reduction="peaks_umap_css") & NoAxes()
+DefaultAssay(seurat) <- "RNA"
+p2 <- FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), cols = beach_colscheme(30), order = T, reduction = "peaks_umap_css") & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "peaks"
+p1 | p2
+
+# Harmony
+seurat <- RunHarmony(seurat, group.by.vars = "sample", reduction = "lsi", dims.use = 2:30, max.iter.harmony = 50, assay.use = "peaks", reduction.save = "peaks_harmony", project.dim = FALSE)
+seurat <- RunUMAP(seurat, reduction = "peaks_harmony", dims = 2:30, reduction.name = "peaks_umap_harmony", reduction.key = "peaksUMAPHARMONY_")
+DimPlot(seurat, group.by = "sample", reduction = "peaks_umap_harmony") & NoAxes()
+
+p1 <- DimPlot(seurat, group.by = "sample", split.by = "sample", reduction = "peaks_umap_harmony") & NoAxes()
+DefaultAssay(seurat) <- "RNA"
+p2 <- FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), cols = beach_colscheme(30), order = T, reduction = "peaks_umap_harmony") & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "peaks"
+p1 | p2
+
+# # CCA
+# seurat.list <- SplitObject(seurat, split.by = "sample")
+# seurat.list <- lapply(X = seurat.list, FUN = function(x) {
+#     x <- NormalizeData(x)
+#     x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+# })
+# features <- SelectIntegrationFeatures(object.list = seurat.list)
+# atac.anchors <- FindIntegrationAnchors(object.list = seurat.list, anchor.features = features, reduction = "rlsi", dims = 2:30)
+# atac.combined <- IntegrateEmbeddings(anchorset = atac.anchors, reductions = seurat[["lsi"]], new.reduction.name = "integrated_lsi", dims.to.integrate = 1:30)
+# atac.combined <- RunUMAP(atac.combined, reduction = "integrated_lsi", dims = 2:30)
+# DimPlot(atac.combined, group.by = "sample")
+
+# Harmony and CCA perform similarly, choosing harmony as it performs best for GEX as well
+
+```
+
+```{r save object with ATAC}
+
+saveRDS(seurat, file="/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/data_processed.seurat.rds")
+
+```
+
+```{r WNN}
+
+seurat <- FindMultiModalNeighbors(seurat, reduction.list = list("rna_harmony", "peaks_harmony"), dims.list = list(1:50, 2:50))
+seurat <- RunUMAP(seurat, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+seurat <- FindClusters(seurat, graph.name = "wsnn", algorithm = 3, verbose = FALSE, resolution = 0.05)
+
+p1 <- DimPlot(seurat, reduction = "rna_umap_harmony", group.by = "sample") + ggtitle("RNA") & NoLegend() 
+p2 <- DimPlot(seurat, reduction = "peaks_umap_harmony", group.by = "sample") + ggtitle("ATAC") & NoLegend() 
+p3 <- DimPlot(seurat, reduction = "wnn.umap", group.by = "sample") + ggtitle("WNN")
+p1 + p2 + p3 & theme(plot.title = element_text(hjust = 0.5)) & NoAxes()
+
+png("Plots/umapplot_majorct_wnn.png", height=8, width=24, unit="cm", res=500)
+layout(matrix(1:3,nrow=1)); par(mar=c(1,1,1,1), cex=0.4)
+plotFeature(Embeddings(seurat,"wnn.umap"), seurat$wsnn_res.0.05, colorPal= c(c("#DDB40D","#C24032","#2CA089","#566573")), pt_border = T, lwd_border = 0.1, cex=0.7)
+plotFeature(Embeddings(seurat,"wnn.umap"), seurat$timepoint, colorPal=c("#3FA4D9","#3EB8B4","#F6A22B"), pt_border = T, lwd_border = 0.1, cex=0.7, do_legend = T, legend_pos = "top", legend_cex = 1.5)
+plotFeature(Embeddings(seurat,"wnn.umap"), seurat$line, colorPal=c("#303030","#cdcdcd"), pt_border = T, lwd_border = 0.1, cex=0.7, do_legend = T, legend_pos = "top", legend_cex = 1.5)
+dev.off()
+
+png("Plots/umapplot_majorct_monomodal.png", height=16, width=24, unit="cm", res=500)
+layout(matrix(1:6,nrow=2,byrow=T)); par(mar=c(1,1,1,1), cex=0.4)
+plotFeature(Embeddings(seurat,"rna_umap_harmony"), seurat$wsnn_res.0.05, colorPal=c(c("#DDB40D","#C24032","#2CA089","#566573")), pt_border = T, lwd_border = 0.1, cex=0.7)
+plotFeature(Embeddings(seurat,"rna_umap_harmony"), seurat$timepoint, colorPal=c("#3FA4D9","#3EB8B4","#F6A22B"), pt_border = T, lwd_border = 0.1, cex=0.7, do_legend = T, legend_pos = "top", legend_cex = 1.5)
+plotFeature(Embeddings(seurat,"rna_umap_harmony"), seurat$line, colorPal=c("#303030","#cdcdcd"), pt_border = T, lwd_border = 0.1, cex=0.7, do_legend = T, legend_pos = "top", legend_cex = 1.5)
+plotFeature(Embeddings(seurat,"peaks_umap_harmony"), seurat$wsnn_res.0.05, colorPal=c(c("#DDB40D","#C24032","#2CA089","#566573")), pt_border = T, lwd_border = 0.1, cex=0.7)
+plotFeature(Embeddings(seurat,"peaks_umap_harmony"), seurat$timepoint, colorPal=c("#3FA4D9","#3EB8B4","#F6A22B"), pt_border = T, lwd_border = 0.1, cex=0.7, do_legend = T, legend_pos = "top", legend_cex = 1.5)
+plotFeature(Embeddings(seurat,"peaks_umap_harmony"), seurat$line, colorPal=c("#303030","#cdcdcd"), pt_border = T, lwd_border = 0.1, cex=0.7, do_legend = T, legend_pos = "top", legend_cex = 1.5)
+dev.off()
+
+png("Plots/featureplot_genes_1.png", height=18, width=24, unit="cm", res=500)
+plotMultiFeatures(Embeddings(seurat,"wnn.umap"), seurat@assays$RNA@data[c("HAND1","PECAM1","GJA5","COL2A1","PDGFRB","ACTA2"),], colorPal=blue_colscheme, random_order=F, sort_by_value=T, cex=0.8, cex.main=2.5, ncol=3)
+dev.off()
+
+plotMultiFeatures(Embeddings(seurat,"rna_umap_harmony"), seurat@assays$RNA@data[c("CLDN5","NR2F2","GJA5","COL2A1","PDGFRB","ACTA2"),], colorPal=blue_colscheme, random_order=F, sort_by_value=T, cex=0.8, cex.main=2.5, ncol=3)
+plotMultiFeatures(Embeddings(seurat,"peaks_umap_harmony"), seurat@assays$RNA@data[c("CLDN5","NR2F2","GJA5","COL2A1","PDGFRB","ACTA2"),], colorPal=blue_colscheme, random_order=F, sort_by_value=T, cex=0.8, cex.main=2.5, ncol=3)
+
+png("Plots/featureplot_genes_2.png", height=21, width=18, unit="cm", res=500)
+plotMultiFeatures(Embeddings(seurat,"wnn.umap"), seurat@assays$RNA@data[c("PECAM1", "MESP1", "ACTA2", "PDGFRB"),], colorPal=blue_colscheme, random_order=F, sort_by_value=T, cex=0.8, cex.main=2.5, ncol=2)
+dev.off()
+
+pdf("Plots/umapplot_rna_timepoint.pdf")
+plotFeature(Embeddings(seurat,"rna_umap_harmony"), seurat$timepoint, colorPal=c("#303030","#828282","#cdcdcd"), pt_border = T, lwd_border = 0.1, cex=0.5, do_legend = T, legend_pos = "top", legend_cex = 1.5)
+dev.off()
+
+pdf("Plots/umapplot_peaks_timepoint.pdf")
+plotFeature(Embeddings(seurat,"peaks_umap_harmony"), seurat$timepoint, colorPal=c("#303030","#828282","#cdcdcd"), pt_border = T, lwd_border = 0.1, cex=0.5, do_legend = T, legend_pos = "top", legend_cex = 1.5)
+dev.off()
+         
+pdf("Plots/umapplot_wnn_timepoint.pdf")
+plotFeature(Embeddings(seurat,"wnn.umap"), seurat$timepoint, colorPal=c("#303030","#828282","#cdcdcd"), pt_border = T, lwd_border = 0.1, cex=0.5, do_legend = T, legend_pos = "top", legend_cex = 1.5)
+dev.off()
+
+```
+
+```{r save object with WNN}
+
+saveRDS(seurat, file="/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/data_processed.seurat.rds")
+
+```
+
+```{r find cluster markers for GEX and ATAC}
+
+DE_cl <- wilcoxauc(seurat, group_by = "wsnn_res.0.05", seurat_assay = "RNA")
+DEG_cl <- lapply(split(DE_cl, DE_cl$group), function(x){
+  x <- x[which(x$logFC > log(1.2) & x$auc > 0.65 & x$padj < 0.01 & x$pct_in - x$pct_out > 20 & x$pct_out < 20),]
+  return(x[order(x$pct_out),])
+})
+# Save the table
+write.csv(DE_cl, "Plots/DE_cl_wsnn_res.0.05.csv")
+sapply(names(DEG_cl), 
+function (x) write.csv(DEG_cl[[x]], file=paste0("Plots/DEG_cl_wsnn_res.0.05.csv_",x, ".csv")))
+
+
+DA_cl <- wilcoxauc(seurat, group_by = "wsnn_res.0.05", seurat_assay = "peaks")
+DAP_cl <- lapply(split(DA_cl,DA_cl$group), function(x){
+  x <- x[which(x$padj < 0.01 & x$auc > 0.55 & x$pct_in - x$pct_out > 5),]
+  return(x[order(x$pct_in - x$pct_out, decreasing=T),])
+})
+
+ensdb <- retrieve_ensbd(version = 98)
+seurat <- annotate_peaks(seurat, assay = "peaks", TxDb = ensdb)
+DAP_cl <- lapply(DAP_cl, function(x){
+  x$gene <- seurat@assays$peaks@meta.features[x$feature,"SYMBOL"]
+  return(x)
+})
+
+lapply(names(DEG_cl), function(cl) intersect(DAP_cl[[cl]]$gene, DEG_cl[[cl]]$feature))
+example_peaks <- c(DAP_cl[[1]]$feature[which(DAP_cl[[1]]$gene=="EPHB2")],
+                  DAP_cl[[2]]$feature[which(DAP_cl[[2]]$gene=="BCL6B")[1]],
+                  DAP_cl[[3]]$feature[which(DAP_cl[[3]]$gene=="HHIPL2")[1]],
+                  DAP_cl[[4]]$feature[which(DAP_cl[[4]]$gene=="WWC1")[1]])
+
+DefaultAssay(seurat) <- "RNA"
+
+CoveragePlot(seurat,
+             region = example_peaks,
+             assay = "peaks",
+             group.by="wsnn_res.0.05",
+             window = 50,
+             extend.upstream = 5000,
+             extend.downstream = 5000,
+             expression.assay = "RNA",
+             features = c("EPHB2","BCL6B", "HHIPL2", "WWC1")) & scale_fill_manual(values = c("#DDB40D","#C24032","#2CA089","#566573"))
+
+pdf("Plots/coverageplot_atac_majorct.pdf")
+CoveragePlot(seurat,
+             region = example_peaks,
+             assay = "peaks",
+             group.by="wsnn_res.0.05",
+             window = 50,
+             extend.upstream = 1000,
+             extend.downstream = 1000) & scale_fill_manual(values = c("#DDB40D","#C24032","#2CA089","#566573"))
+dev.off()
+
+png("Plots/featureplot_atac_majorct_EPHB2_BCL6B_HHIPL2_WWC1.png", height=18, width=16, unit="cm", res=500)
+plotMultiFeatures(Embeddings(seurat,"wnn.umap"), seurat@assays$RNA@data[c("EPHB2","BCL6B", "HHIPL2", "WWC1"),], colorPal=blue_colscheme, cex=1, random_order=F, sort_by_value=T, cex.main=1.5, par_cex = 0.5)
+dev.off()
+
+common_marker_peaks <- c(DAP_cl[[2]]$feature[which(DAP_cl[[2]]$gene=="PECAM1")],
+                  DAP_cl[[3]]$feature[which(DAP_cl[[3]]$gene=="MESP1")[1]],
+                  DAP_cl[[4]]$feature[which(DAP_cl[[4]]$gene=="PDGFRB")[1]])
+
+pdf("Plots/coverageplot_common_markers.pdf")
+CoveragePlot(test,
+             region = common_marker_peaks,
+             assay = "peaks",
+             group.by="wsnn_res.0.05",
+             window = 50,
+             extend.upstream = 500,
+             extend.downstream = 500) & scale_fill_manual(values = c("#DDB40D","#C24032","#2CA089","#566573"))
+dev.off()
+
+```
+
+
+# Project to timecourse data
+#### Data projection
+```{r projection to timecourse}
+
+# data projection to timecourse
+DefaultAssay(seurat) <- "RNA"
+col_cl <- setNames(c(c("#1F618D","#2874A6"),
+                     colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(5),
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4),
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(7), 
+                     c("#BFC9CA","#566573","#273746")),
+                   c(c(0,3),
+                     c(4,9,10,13,2),
+                     c(7,1,8,16),
+                     c(14,15,18,11,5,6,20),
+                     c(17,19,12))) # color orders: PSC, mesoderm, mural, endothelial, others
+
+seurat_timecourse <- readRDS("/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/data/data.seurat_untransplanted_noWTC.rds")
+DefaultAssay(seurat) <- "RNA"
+anchors2timecourse <- FindTransferAnchors(reference = seurat_timecourse, query = seurat, reduction = "pcaproject")
+transferred_cl_timecourse <- TransferData(anchorset = anchors2timecourse, refdata = seurat_timecourse$RNA_css_snn_res.0.8)
+
+m_css_timecourse <- readRDS("/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/analysis/res.css_models_untransplanted_noWTC.rds")
+seurat <- css_project(seurat, model = m_css_timecourse$css, use_fast_rank = F, reduction.name = "rna_cssproj_tc", reduction.key = "RNACSSPROJTC_")
+proj_cl_timecourse <- transfer_labels(m_css_timecourse$css$sim2profiles, Embeddings(seurat,"rna_cssproj_tc"), label_ref = seurat_timecourse$RNA_css_snn_res.0.8, thres_prop_match = 0.2)
+proj_embed_timecourse <- ProjectUMAP(Embeddings(seurat, "rna_cssproj_tc"), reference = m_css_timecourse$css$sim2profiles, reduction.model = seurat_timecourse[['umap_css']], k.param = 30)
+
+seurat$transferred_cl_timecourse <- transferred_cl_timecourse$predicted.id
+seurat$transfer_max_score <- transferred_cl_timecourse$prediction.score.max
+seurat$proj_cl_timecourse <- proj_cl_timecourse
+seurat$proj_ct_timecourse <- setNames(rep(c("PSC","Mesoderm","Mural","Endo","Others"),c(2,5,4,7,3)),
+                                      c(0,3,4,9,10,13,2,7,1,8,16,14,15,18,11,5,6,20,17,19,12))[seurat$proj_cl_timecourse]
+seurat[['rna_umap_proj']] <- proj_embed_timecourse$proj.umap
+
+# saveRDS(seurat, file="/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/data_processed.seurat.rds")
+
+avg_expr_transferred_cl <- sapply(names(which(table(transferred_cl_timecourse$predicted.id)>50)), function(cl) rowMeans(seurat@assays$RNA@data[,which(transferred_cl_timecourse$predicted.id == cl)]))
+avg_expr_proj_cl <- sapply(names(which(table(proj_cl_timecourse)>50)), function(cl) rowMeans(seurat@assays$RNA@data[,which(proj_cl_timecourse == cl)]))
+avg_expr_cl_timecourse <- sapply(levels(seurat_timecourse$RNA_css_snn_res.0.8), function(cl) rowMeans(seurat_timecourse@assays$RNA@data[,which(seurat_timecourse$RNA_css_snn_res.0.8 == cl)]))
+corr <- cor(avg_expr_proj_cl[intersect(VariableFeatures(seurat_timecourse),VariableFeatures(seurat)),],
+            avg_expr_cl_timecourse[intersect(VariableFeatures(seurat_timecourse),VariableFeatures(seurat)),])
+corr <- corr[intersect(names(col_cl), rownames(corr)),names(col_cl)]
+
+pdf("Plots/heatmap_RNA_sim2timecourse.pdf")
+gplots::heatmap.2(corr, Rowv = NA, Colv=NA, dendrogram="none", scale = "row", trace="none", key=F, keysize=0.2, ColSideColors = col_cl[colnames(corr)], RowSideColors = col_cl[rownames(corr)], col = bluewhitered_colscheme(50), cexRow = 1.5, cexCol = 1.5)
+dev.off()
+
+corr2timecourse <- qlcMatrix::corSparse(seurat@assays$RNA@data[intersect(VariableFeatures(seurat_timecourse),VariableFeatures(seurat)),],
+                                        avg_expr_cl_timecourse[intersect(VariableFeatures(seurat_timecourse),VariableFeatures(seurat)),])
+dimnames(corr2timecourse) <- list(colnames(seurat), colnames(avg_expr_cl_timecourse))
+corr2timecourse_scaled <- t(scale(t(corr2timecourse)))
+corr2proj <- corr2timecourse_scaled[cbind(rownames(corr2timecourse_scaled),seurat$proj_cl_timecourse)]
+tapply(corr2proj, seurat$timepoint, mean)
+
+```
+
+#### Plot projected cells
+```{r plot projected cells}
+
+(DimPlot(seurat, group.by = "sample", reduction = "rna_umap_harmony") & NoAxes()) |
+  (DimPlot(seurat, group.by = "proj_cl_timecourse", reduction = "rna_umap_harmony", cols = col_cl[names(col_cl) %in% seurat$proj_cl_timecourse]) & NoAxes()) |
+  (FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), reduction = "rna_umap_harmony", cols = blue_colscheme(30), order = T) & NoAxes() & NoLegend())
+(DimPlot(seurat, group.by = "timepoint", reduction = "rna_umap_proj") & NoAxes()) |
+  (DimPlot(seurat, group.by = "proj_cl_timecourse", reduction = "rna_umap_proj", cols = col_cl[names(col_cl) %in% seurat$proj_cl_timecourse]) & NoAxes()) |
+  (FeaturePlot(seurat, features = c("HAND1","CLDN5","PDGFRB","ETV2"), reduction = "rna_umap_proj", cols = blue_colscheme(30), order = T) & NoAxes() & NoLegend())
+
+png("Plots/projection_to_timecourse.png", height=8, width=32, unit="cm", res=500)
+layout(matrix(1:4,nrow=1)); par(mar=c(1,1,1,1), cex=0.5)
+#plotFeature(Embeddings(seurat_timecourse, "umap_css"), seurat_timecourse$RNA_css_snn_res.0.8, colorPal = col_cl, cex=0.6, pt_border = T, lwd_border = 0.2, emphasize=which(seurat_timecourse$timepoint=="D7"), mask_col = "#dedede")
+plot(Embeddings(seurat_timecourse,"umap_css"), pch=16, col="#dedede", cex=0.8, axes=F, bty="n")
+points(Embeddings(seurat,"rna_umap_proj"), pch=21, col="#303030", lwd=0.1, bg= c("#DDB40D","#C24032","#2CA089","#566573")[seurat$wsnn_res.0.05], cex=0.6)
+plot(Embeddings(seurat_timecourse,"umap_css"), pch=16, col="#dedede", cex=0.8, axes=F, bty="n")
+points(Embeddings(seurat,"rna_umap_proj"), pch=21, col="#303030", lwd=0.1, bg=col_cl[as.character(seurat$proj_cl_timecourse)], cex=0.6)
+plot(Embeddings(seurat_timecourse,"umap_css"), pch=16, col="#dedede", cex=0.8, axes=F, bty="n")
+points(Embeddings(seurat,"rna_umap_proj"), pch=21, col="#303030", lwd=0.2, bg=c(H9="#303030",NC8="#cdcdcd")[seurat$line], cex=0.6)
+legend("top", legend = c("H9","NC8"), pch=21, col="#303030", pt.bg=c("#303030","#cdcdcd"), cex=1.5, bty="n")
+plot(Embeddings(seurat_timecourse,"umap_css"), pch=16, col="#dedede", cex=0.8, axes=F, bty="n")
+points(Embeddings(seurat,"rna_umap_proj"), pch=21, col="#303030", lwd=0.2, bg= c("#3FA4D9","#3FA4D9","#3FA4D9","#3EB8B4","#F6A22B","#F6A22B","#F6A22B")[seurat$timepoint], cex=0.6)
+legend("top", legend = c("d3","d4","d7"), pch=21, col="#303030", pt.bg=c("#3FA4D9","#3EB8B4","#F6A22B"), cex=1.5, bty="n")
+dev.off()
+
+png("Plots/projection_to_timecourse_all_modalities.png", height=8, width=24, unit="cm", res=500)
+layout(matrix(1:3,nrow=1)); par(mar=c(1,1,3,1))
+plotFeature(Embeddings(seurat,"wnn.umap"), seurat$proj_cl_timecourse, colorPal = col_cl, cex=0.8, pt_border = T, lwd_border=0.1, do_label = T, cex.label = 2, label_round = T, main = "WNN", cex.main=2.5)
+plotFeature(Embeddings(seurat,"rna_umap_harmony"), seurat$proj_cl_timecourse, colorPal = col_cl, cex=0.8, pt_border = T, lwd_border=0.1, do_label = T, cex.label = 2, label_round = T, main = "RNA", cex.main=2.5)
+plotFeature(Embeddings(seurat,"peaks_umap_harmony"), seurat$proj_cl_timecourse, colorPal = col_cl, cex=0.8, pt_border = T, lwd_border=0.1, do_label = T, cex.label = 2, label_round = T, main = "peaks", cex.main=2.5)
+dev.off()
+
+png("Plots/projection_to_timecourse_by_timepoint.png", height=8, width=24, unit="cm", res=500)
+layout(matrix(1:3,nrow=1)); par(mar=c(1,1,3,1))
+plotFeature(Embeddings(seurat,"wnn.umap"), seurat$timepoint, colorPal = colorRampPalette(c("#3FA4D9","#3EB8B4","#F6A22B")), cex=0.8, pt_border = T, lwd_border=0.1, do_label = T, cex.label = 2, label_round = T, main = "WNN", cex.main=2.5)
+plotFeature(Embeddings(seurat,"rna_umap_harmony"), seurat$timepoint, colorPal = colorRampPalette(c("#3FA4D9","#3EB8B4","#F6A22B")), cex=0.8, pt_border = T, lwd_border=0.1, do_label = T, cex.label = 2, label_round = T, main = "RNA", cex.main=2.5)
+plotFeature(Embeddings(seurat,"peaks_umap_harmony"), seurat$timepoint, colorPal = colorRampPalette(c("#3FA4D9","#3EB8B4","#F6A22B")), cex=0.8, pt_border = T, lwd_border=0.1, do_label = T, cex.label = 2, label_round = T, main = "peaks", cex.main=2.5)
+dev.off()
+
+```
+
+#### Look for ATAC signatures for the projected cell clusters
+```{r ATAC analysis of the projected cell clusters}
+
+DefaultAssay(seurat) <- "ATAC"
+seurat$proj_cl_timecourse <- factor(seurat$proj_cl_timecourse, levels = intersect(names(col_cl), unique(seurat$proj_cl_timecourse)))
+
+det_rates_atac_proj_cl <- sapply(names(which(table(seurat$proj_cl_timecourse)>80)), function(cl) rowMeans(seurat@assays$peaks@data[,which(seurat$proj_cl_timecourse == cl)]>0))
+diff_det_rates <- apply(det_rates_atac_proj_cl,1,function(x) max(x)-sort(x,decreasing = T)[2])
+avg_atac_proj_cl <- sapply(names(which(table(seurat$proj_cl_timecourse)>80)), function(cl) rowMeans(seurat@assays$peaks@data[,which(seurat$proj_cl_timecourse == cl)]))
+max_rate_atac_proj_cl <- setNames(colnames(det_rates_atac_proj_cl)[apply(det_rates_atac_proj_cl,1,which.max)], rownames(det_rates_atac_proj_cl))
+max_sig_atac_proj_cl <- setNames(colnames(avg_atac_proj_cl)[apply(avg_atac_proj_cl,1,which.max)], rownames(avg_atac_proj_cl))
+
+DA_peaks <- wilcoxauc(seurat, group_by = "proj_cl_timecourse", seurat_assay = "peaks")
+DAP_ct <- setNames(lapply(names(which(table(seurat$proj_cl_timecourse)>80)), function(cl){
+  x <- DA_peaks[which(DA_peaks$group == cl & DA_peaks$padj < 0.01 & (DA_peaks$pct_in / DA_peaks$pct_out > 5 | (DA_peaks$pct_in - DA_peaks$pct_out > 10 & DA_peaks$pct_out < 10))),]
+  x <- x[x$feature %in% names(which(max_rate_atac_proj_cl == cl & max_sig_atac_proj_cl == cl)),]
+  x <- x[order(x$pct_in - x$pct_out, decreasing=T),]
+  return(x)
+}), names(which(table(seurat$proj_cl_timecourse)>80)))
+sapply(DAP_ct,nrow)
+
+# Save all 
+sapply(names(DAP_ct), 
+function (x) write.csv(DAP_ct[[x]], file=paste("Plots/DAP_ct_",x, ".csv")))
+
+features2plot <- unique(unlist(lapply(DAP_ct, function(x) x$feature[0:min(c(10,nrow(x)))])))
+avg_expr_features2plot <- sapply(names(which(table(seurat$proj_cl_timecourse)>80)), function(ct)
+  rowMeans(seurat@assays$peaks@data[features2plot,which(seurat$proj_cl_timecourse==ct)]))
+avg_expr_features2plot <- avg_expr_features2plot[,intersect(names(col_cl), colnames(avg_expr_features2plot))]
+gplots::heatmap.2(t(apply(avg_expr_features2plot[order(apply(avg_expr_features2plot,1,which.max)),],1,function(x) (x-min(x))/(max(x)-min(x)))),
+                  Rowv=NA, Colv=NA, dendrogram="none", scale="none", trace="none", key=F, keysize=0.2, cexRow = 0.9, cexCol = 1.5, ColSideColors = col_cl[colnames(avg_expr_features2plot)], col = greyscale_colscheme(50), margins = c(7,12), colsep = seq(0,ncol(avg_expr_features2plot)), sepcolor = "#000000", sepwidth = c(0.02,0.02))
+
+plotMultiFeatures(Embeddings(seurat,"wnn.umap"), seurat@assays$peaks@data[unlist(lapply(DAP_ct[intersect(names(col_cl), names(DAP_ct))], function(x) x$feature[1])),], colorPal = pink_colscheme, cex=0.6, random_order=F, sort_by_value=T, cex.main = 1.5)
+plotMultiFeatures(Embeddings(seurat,"rna_umap_proj"), seurat@assays$peaks@data[unlist(lapply(DAP_ct[intersect(names(col_cl), names(DAP_ct))], function(x) x$feature[1])),], colorPal = pink_colscheme, cex=0.6, random_order=F, sort_by_value=T, cex.main = 1.5)
+
+```
+#### Binomial Generalized Linear Model on peaks
+```{r binomial GLM}
+
+det_rates_atac <- rowMeans(seurat@assays$peaks@data > 0)
+peak_cands <- names(which(det_rates_atac > 0.005))
+atac_profile <- seurat@assays$peaks@data[peak_cands,]
+covar <- data.frame(coverage = seurat$nCount_ATAC, cl = seurat$proj_cl_timecourse, line = seurat$line, timepoint = seurat$timepoint)
+DA_binom <- binom_group_test(expr = atac_profile, coverage = covar$coverage, group = covar$cl, covar = data.frame(covar$line, covar$timepoint), num_threads = 5)
+saveRDS(DA_binom, file="Objects/res.DA_binomial_ANCOVA.rds")
+write.csv(DA_binom, file="Plots/ DA_binomial_ANCOVA.csv")
+
+# DA_binom <- readRDS("Objects/res.DA_binomial_ANCOVA.rds")
+sig_peaks <- rownames(DA_binom)[which(p.adjust(DA_binom$p_ANOVA,method="bonferroni")<0.01)]
+
+scaled_coefs_sig_peaks <- DA_binom[sig_peaks,-(1:2)]
+colnames(scaled_coefs_sig_peaks) <- gsub("^coef_","",colnames(scaled_coefs_sig_peaks))
+scaled_coefs_sig_peaks <- t(scale(t(scaled_coefs_sig_peaks[,intersect(names(col_cl),names(which(table(seurat$proj_cl_timecourse)>80)))])))
+ranks_coefs_sig_peaks <- t(apply(scaled_coefs_sig_peaks,1,rank))
+
+nn_sig_peaks <- FindNeighbors(ranks_coefs_sig_peaks, k.param = 20)
+cl_sig_peaks <- FindClusters(nn_sig_peaks$snn, resolution = 0.7) 
+seurat@assays$peaks@meta.features$is_tested <- rownames(seurat@assays$peaks) %in% peak_cands
+seurat@assays$peaks@meta.features$var_proj_cl <- rownames(seurat@assays$peaks) %in% rownames(cl_sig_peaks)
+seurat@assays$peaks@meta.features$cl <- cl_sig_peaks[rownames(seurat@assays$peaks),1]
+# saveRDS(seurat, file="/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/data_processed.seurat.rds")
+
+avg_atac_prof_peak_cl <- sapply(levels(cl_sig_peaks[,1]), function(cl) colMeans(ranks_coefs_sig_peaks[which(cl_sig_peaks[,1]==cl),]))
+
+pdf("Plots/variable_peaks_clusters.pdf")
+mat <- apply(avg_atac_prof_peak_cl,2,function(x) (x-min(x))/(max(x)-min(x)))
+gplots::heatmap.2(mat[,order(apply(mat,2,which.max))],
+                  Rowv=NA, RowSideColors = col_cl[rownames(avg_atac_prof_peak_cl)],
+                  Colv=NA, ColSideColors = greyscale_colscheme(30)[as.numeric(cut((as.numeric(table(cl_sig_peaks$res.0.7))), breaks = seq(0,(max(table(cl_sig_peaks$res.0.7))), length.out = 31)))][order(apply(mat,2,which.max))],
+                  dendrogram="none", scale="none",key=F, keysize=0.3, trace="none",col=bluered_colscheme(30), cexCol = 1.5, cexRow = 1.5)
+barplot(table(cl_sig_peaks$res.0.7)[order(apply(mat,2,which.max))], las=2)
+dev.off()
+
+```
+
+#### Visualization ATAC
+```{r ATAC visualization}
+
+seurat_sub <- subset(seurat, subset = proj_cl_timecourse %in% colnames(avg_expr_features2plot))
+seurat_sub$proj_cl_timecourse <- factor(seurat_sub$proj_cl_timecourse, levels = intersect(names(col_cl), unique(seurat_sub$proj_cl_timecourse)))
+
+# seurat_sub$proj_cl_timecourse <- droplevels(seurat_sub$proj_cl_timecourse)
+
+pdf("Plots/coverageplot_atac_markers.pdf", height=15, width=20)
+CoveragePlot(seurat_sub,
+             region = unlist(lapply(DAP_ct[intersect(names(col_cl), names(DAP_ct))], function(x) x$feature[which.max(x$auc)])),
+             assay = "peaks",
+             group.by="proj_cl_timecourse",
+             window = 50,
+             extend.upstream = 1000,
+             extend.downstream = 1000) & scale_fill_manual(values = col_cl[as.character(seurat$proj_cl_timecourse)])
+dev.off()
+
+pdf("Plots/coverageplot_atac_markers_c15.pdf", height=15, width=20)
+CoveragePlot(seurat_sub,
+             region = DAP_ct[['15']]$feature[1:12],
+             assay = "peaks",
+             group.by="proj_cl_timecourse",
+             window = 50,
+             extend.upstream = 3000,
+             extend.downstream = 3000) & scale_fill_manual(values = col_cl[as.character(seurat$proj_cl_timecourse)])
+dev.off()
+
+# pdf("Plots/coverageplot_atac_negmarkers_c15.pdf", height=20, width=30)
+# CoveragePlot(seurat_sub,
+#              region = rownames(det_rates_atac_proj_cl)[(det_rates_atac_proj_cl[,"15"]<0.01 & apply(det_rates_atac_proj_cl[,setdiff(colnames(det_rates_atac_proj_cl),"15")],1,mean)>0.025)],
+#              assay = "peaks",
+#              group.by="proj_cl_timecourse",
+#              window = 50,
+#              extend.upstream = 3000,
+#              extend.downstream = 3000) & scale_fill_manual(values = col_cl[as.character(seurat$proj_cl_timecourse)])
+# dev.off()
+
+pdf("Plots/coverageplot_atac_markers_c18.pdf", height=15, width=20)
+CoveragePlot(seurat_sub,
+             region = DAP_ct[['18']]$feature[1:12],
+             assay = "peaks",
+             group.by="proj_cl_timecourse",
+             window = 50,
+             extend.upstream = 3000,
+             extend.downstream = 3000) & scale_fill_manual(values = col_cl[as.character(seurat$proj_cl_timecourse)])
+dev.off()
+
+pdf("Plots/coverageplot_atac_markers_c7.pdf", height=15, width=20)
+CoveragePlot(seurat_sub,
+             region = DAP_ct[['7']]$feature[1:12],
+             assay = "peaks",
+             group.by="proj_cl_timecourse",
+             window = 50,
+             extend.upstream = 3000,
+             extend.downstream = 3000) & scale_fill_manual(values = col_cl[as.character(seurat$proj_cl_timecourse)])
+dev.off()
+
+pdf("Plots/example_peak_c18.pdf")
+CoveragePlot(seurat_sub,
+             region = DAP_ct[['18']]$feature[5],
+             assay = "peaks",
+             group.by="proj_cl_timecourse",
+             window = 100,
+             extend.upstream = 10000,
+             extend.downstream = 10000) & scale_fill_manual(values = col_cl[as.character(seurat$proj_cl_timecourse)])
+dev.off()
+
+CoveragePlot(seurat_sub,
+             region = sapply(c("1","2","10","0"), function(i) sig_peaks[cl_sig_peaks$res.0.7==i][which.min(DA_binom[sig_peaks[cl_sig_peaks$res.0.7==i],"p_ANOVA"])]),
+             assay = "peaks",
+             group.by="proj_cl_timecourse",
+             window = 50,
+             extend.upstream = 3000,
+             extend.downstream = 3000)  & scale_fill_manual(values = col_cl[as.character(seurat$proj_cl_timecourse)])
+
+pdf("Plots/sig_peaks.pdf", height=20, width=25)
+CoveragePlot(seurat_sub,
+             region = sapply(colnames(mat)[order(apply(mat,2,which.max))], function(i) sig_peaks[cl_sig_peaks$res.0.7==i][which.min(DA_binom[sig_peaks[cl_sig_peaks$res.0.7==i],"p_ANOVA"])]),
+             assay = "peaks",
+             group.by="proj_cl_timecourse",
+             window = 50,
+             extend.upstream = 500,
+             extend.downstream = 500) & scale_fill_manual(values = col_cl[names(col_cl) %in% test$proj_cl_timecourse])
+dev.off()
+
+plotMultiFeatures(Embeddings(seurat, "wnn.umap"), seurat@assays$peaks@data[sapply(c("1","2"), function(i) sig_peaks[cl_sig_peaks$res.0.7==i][which.min(DA_binom[sig_peaks[cl_sig_peaks$res.0.7==i],"p_ANOVA"])]),],
+                  colorPal = pink_colscheme, cex=0.5, random_order=F, sort_by_value=T, cex.main=1.5)
+plotMultiFeatures(Embeddings(seurat, "rna_umap_proj"), seurat@assays$peaks@data[sapply(c("1","2"), function(i) sig_peaks[cl_sig_peaks$res.0.7==i][which.min(DA_binom[sig_peaks[cl_sig_peaks$res.0.7==i],"p_ANOVA"])]),],
+                  colorPal = pink_colscheme, cex=0.5, random_order=F, sort_by_value=T, cex.main=1.5)
+
+region <- sapply(colnames(mat)[order(apply(mat,2,which.max))], function(i) sig_peaks[cl_sig_peaks$res.0.7==i][which.min(DA_binom[sig_peaks[cl_sig_peaks$res.0.7==i],"p_ANOVA"])])
+
+```
+
+
+```{r TF binding motif enrichment analysis}
+
+# Examine the accessible regions of each cell to determine enriched motifs. 
+# There are a few ways to do this, but we will use the chromVAR package from the Greenleaf lab. 
+# This calculates a per-cell accessibility score for known motifs, and adds these scores as an additional assay (chromvar) in the Seurat object.
+
+# Obtain position weight matrices of human TF-binding motifs from the CORE collection of JASPAR2020
+pfm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(collection = "CORE", tax_group = 'vertebrates', all_versions = FALSE)
+)
+df_pfm <- data.frame(t(sapply(pfm, function(x)
+  c(id=x@ID, name=x@name, symbol=ifelse(!is.null(x@tags$symbol),x@tags$symbol,NA)))))
+
+DefaultAssay(seurat) <- "peaks"
+seurat <- AddMotifs(seurat, genome = BSgenome.Hsapiens.UCSC.hg38, pfm = pfm)
+
+# Now we can use the FindMotifs function in Signac to identify enriched TF binding motifs in a provided peak list, for instance, the cell-type-specific accessible peaks. 
+# Similar to the functional enrichment analysis for inferring possible gene set function, the motif enrichment analysis also requires a background set. 
+# By default, it randomly selects 40000 peaks from the whole peak list. 
+# Alternatively, we can define the background peak list based on their accessibility in certain cell types, for instance, as well as peaks with matched GC content as the peak list of interest.
+DefaultAssay(seurat) <- "peaks"
+open_peaks <- AccessiblePeaks(seurat)
+write.table(open_peaks, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Plots/open_peaks.txt", quote=F, row.names=F, col.names=F)
+
+DA_ct_peaks <- wilcoxauc(seurat, group_by = "wsnn_res.0.05", seurat_assay = "peaks")
+write.csv(DA_ct_peaks, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Plots/DA_ct_peaks.csv")
+top_peaks_ct <- DA_ct_peaks %>%
+  dplyr::filter(abs(logFC) > log(1.1) &
+         padj < 0.01 &
+         auc > 0.55) %>%
+  group_by(group) %>%
+  top_n(100, wt = auc)
+write.csv(top_peaks_ct, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Plots/DA_ct_peaks_top100.csv")
+
+marker_ct_peak <- DA_ct_peaks %>% group_by(group) %>% top_n(1, wt=auc)
+
+peaks_matched <- MatchRegionStats(meta.feature = seurat[['peaks']]@meta.features[open_peaks, ],
+                                  query.feature = seurat[['peaks']]@meta.features[marker_ct_peak$feature, ],
+                                  n = 50000)
+
+# Mural cells
+motif_enrichment_ct0 <- FindMotifs(seurat,
+                                     features = top_peaks_ct$feature[top_peaks_ct$group == "0"],
+                                     background = peaks_matched) %>%
+  mutate(symbol = setNames(ifelse(is.na(df_pfm$symbol), df_pfm$name, df_pfm$symbol), df_pfm$id)[motif]) %>%
+  mutate(padj = p.adjust(pvalue, method="BH"))
+enriched_motif_0 <- motif_enrichment_ct0 %>%
+  dplyr::filter(padj < 0.01 & fold.enrichment > 3) %>%
+  top_n(-4, wt = padj)
+write.csv(motif_enrichment_ct0, "Plots/motif_enrichment_ct0.csv")
+
+# Endothelial cells
+motif_enrichment_ct1 <- FindMotifs(seurat,
+                                    features = top_peaks_ct$feature[top_peaks_ct$group == "1"],
+                                    background = peaks_matched) %>%
+  mutate(symbol = setNames(ifelse(is.na(df_pfm$symbol), df_pfm$name, df_pfm$symbol), df_pfm$id)[motif]) %>%
+  mutate(padj = p.adjust(pvalue, method="BH"))
+enriched_motif_1 <- motif_enrichment_ct1 %>%
+  dplyr::filter(padj < 0.01 & fold.enrichment > 3) %>%
+  top_n(-4, wt = padj)
+write.csv(motif_enrichment_ct1, "Plots/motif_enrichment_ct1.csv")
+
+# Mesodermal cells
+motif_enrichment_ct2 <- FindMotifs(seurat,
+                                     features = top_peaks_ct$feature[top_peaks_ct$group == "2"],
+                                     background = peaks_matched) %>%
+  mutate(symbol = setNames(ifelse(is.na(df_pfm$symbol), df_pfm$name, df_pfm$symbol), df_pfm$id)[motif]) %>%
+  mutate(padj = p.adjust(pvalue, method="BH"))
+enriched_motif_2 <- motif_enrichment_ct2 %>%
+  dplyr::filter(padj < 0.01 & fold.enrichment > 3) %>%
+  top_n(-4, wt = padj)
+write.csv(motif_enrichment_ct2, "Plots/motif_enrichment_ct2.csv")
+
+# Other cells
+motif_enrichment_ct3 <- FindMotifs(seurat,
+                                     features = top_peaks_ct$feature[top_peaks_ct$group == "3"],
+                                     background = peaks_matched) %>%
+  mutate(symbol = setNames(ifelse(is.na(df_pfm$symbol), df_pfm$name, df_pfm$symbol), df_pfm$id)[motif]) %>%
+  mutate(padj = p.adjust(pvalue, method="BH"))
+enriched_motif_3 <- motif_enrichment_ct3 %>%
+  dplyr::filter(padj < 0.01 & fold.enrichment > 3) %>%
+  top_n(-4, wt = padj)
+write.csv(motif_enrichment_ct3, "Plots/motif_enrichment_ct3.csv")
+
+
+# Now we can visualize the top-4 overrepresented TF binding motifs in each of the 4 clusters
+p0 <- MotifPlot(seurat, motifs = enriched_motif_0$motif[1:4], ncol=4)
+p1 <- MotifPlot(seurat, motifs = enriched_motif_1$motif[1:4], ncol=4)
+p2 <- MotifPlot(seurat, motifs = enriched_motif_2$motif[1:4], ncol=4)
+p3 <- MotifPlot(seurat, motifs = enriched_motif_3$motif[1:4], ncol=4)
+p0 / p1 / p2 / p3 
+
+png("Plots/enriched_TF_binding_motifs.png", height=24, width=24, unit="cm", res=500)
+p0 / p1 / p2 / p3 
+dev.off()
+
+
+# We can also check the expression of the corresponding TFs with feature plots.
+DefaultAssay(seurat) <- "RNA"
+p0 <- FeaturePlot(seurat,
+                  c("ARID3A","PBX2","MEIS2","PTF1A"),
+                  reduction="wnn.umap",
+                  order=T,
+                  cols = blue_colscheme(30),
+                  ncol=4) & NoAxes() & NoLegend()
+p1 <- FeaturePlot(seurat,
+                  c("IKZF1","SOX8","SOX13","SOX6"),
+                  reduction="wnn.umap",
+                  order=T,
+                  cols = blue_colscheme(30),
+                  ncol=4) & NoAxes() & NoLegend()
+p2 <- FeaturePlot(seurat,
+                  c("MAZ","ZNF148","ZNF263","KLF16"),
+                  reduction="wnn.umap",
+                  order=T,
+                  cols = blue_colscheme(30),
+                  ncol=4) & NoAxes() & NoLegend()
+p3 <- FeaturePlot(seurat,
+                  c("VAX2","GRHL2","VAX1","DRGX"),
+                  reduction="wnn.umap",
+                  order=T,
+                  cols = blue_colscheme(30),
+                  ncol=4) & NoAxes() & NoLegend()
+p0 / p1 / p2 / p3 
+
+png("Plots/GEX_TFs_of_enriched_TF_binding_motifs.png", height=24, width=24, unit="cm", res=500)
+p0 / p1 / p2 / p3 
+dev.off()
+
+```
+
+#### chromVAR
+
+chromVAR estimates motif activity scores for each motif on cell level. 
+For each motif in each cell, it counts the number of ATAC fragments mapped to those peaks.
+It normalizes by the expected numbers based on the average of all cells to get the raw accessibility score. 
+Next, a background peak set is created with comparable GC content and average accessibility as the motif peaks.
+This set of background peaks is used for normalizing the deviation scores. 
+The background accessibility score is then used to normalize the accessibility score of the motif to get the corrected accessibility score of the motif in each cell. 
+
+```{r chromVAR}
+
+DefaultAssay(seurat) <- "peaks"
+seurat <- RunChromVAR(seurat, genome = BSgenome.Hsapiens.UCSC.hg38)
+
+# This creates a new assay in the Seurat object, namely "chromvar" by default. 
+# It contains the JASPAR motifs we added to the Seurat object above as the features, and the chromVAR estimated accessibility scores of those motifs in all cells. 
+# We can then do the differential activity analysis between cell types to identify motifs that show cell type specific enrichment. 
+DefaultAssay(seurat) <- "chromvar"
+DA_motifs_ct <- wilcoxauc(seurat, group_by = "wsnn_res.0.05", seurat_assay = "chromvar") %>%
+  mutate(symbol = setNames(ifelse(is.na(df_pfm$symbol), df_pfm$name, df_pfm$symbol),
+                           df_pfm$id)[feature])
+enriched_motifs_ct <- DA_motifs_ct %>%
+  filter(padj < 0.01 & auc > 0.7) %>%
+  group_by(group)
+write.csv(DA_motifs_ct, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Plots/DA_motifs_ct_chromVAR.csv")
+
+top_motifs_ct <- top_n(enriched_motifs_ct, 4, wt=auc)
+
+# Visualize
+p0 <- FeaturePlot(seurat,
+            features = top_motifs_ct %>% filter(group == 0) %>% pull(feature),
+            cols = bluered_colscheme(30),
+            reduction = "wnn.umap",
+            ncol = 4) & NoAxes() & NoLegend()
+p1 <- FeaturePlot(seurat,
+            features = top_motifs_ct %>% filter(group == 1) %>% pull(feature),
+            cols = bluered_colscheme(30),
+            reduction = "wnn.umap",
+            ncol = 4) & NoAxes() & NoLegend()
+p2 <- FeaturePlot(seurat,
+            features = top_motifs_ct %>% filter(group == 2) %>% pull(feature),
+            cols = bluered_colscheme(30),
+            reduction = "wnn.umap",
+            ncol = 4) & NoAxes() & NoLegend()
+p3 <- FeaturePlot(seurat,
+            features = top_motifs_ct %>% filter(group == 3) %>% pull(feature),
+            cols = bluered_colscheme(30),
+            reduction = "wnn.umap",
+            ncol = 4) & NoAxes() & NoLegend()
+
+p0 / p1 / p2 / p3 
+
+png("Plots/chromVAR_TF_binding_motifs.png", height=24, width=24, unit="cm", res=500)
+p0 / p1 / p2 / p3 
+dev.off()
+
+
+# Extract TFs marking the 4 different clusters in wsnn_res.0.05 and plot their GEX as well as their motif enrichment
+# Load the human TFs from the animalTFDB database
+human_tfs <- read_tsv("/home/marinani/Scripts/Databases/AnimalTFDB/AnimalTFDB_v3/Homo_sapiens_TF.tsv")
+# Rename all TFs in the enriched motifs table to be capital, because some come from the JASPAR database in small letters
+enriched_motifs_ct_capital <- enriched_motifs_ct%>%mutate(symbol=toupper(symbol))
+# Filter the motifs whose TFs are also in the database and whose motifs are enriched in the same cell type
+tf_motifs_ct <- enriched_motifs_ct_capital %>%
+  filter(symbol %in% human_tfs$Symbol)
+# Filter the TFs from the GEX DE genes in each cluster
+marker_tfs_ct <- DE_cl %>%
+  filter(feature %in% human_tfs$Symbol &
+         abs(logFC) > log(1.2) &
+         padj < 0.01 &
+         auc > 0.65 &
+         pct_in - pct_out > 20) %>%
+  inner_join(tf_motifs_ct,
+             by = c("feature" = "symbol"),
+             suffix = c("_tf","_motif")) %>%
+  filter(group_tf == group_motif)
+
+
+top_tfs_ct <- group_by(marker_tfs_ct, group_tf) %>%
+  top_n(2, wt = auc_motif)
+
+DefaultAssay(seurat) <- "RNA"
+p0 <- FeaturePlot(seurat,
+                  top_tfs_ct$feature,
+                  reduction = "wnn.umap",
+                  order=T,
+                  cols=blue_colscheme(30),
+                  ncol=8) & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "chromvar"
+p1 <- FeaturePlot(seurat,
+                  top_tfs_ct$feature_motif,
+                  reduction = "wnn.umap",
+                  order=T,
+                  cols=bluered_colscheme(30),
+                  ncol=8) & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "peaks"
+top_motifs_ct <- DA_motifs_ct %>%
+  filter(feature %in% top_tfs_ct$feature_motif) %>%
+  group_by(group)
+p2 <- MotifPlot(seurat, motifs = unique(top_motifs_ct$feature), ncol = 8)
+
+p0 / p1 / p2
+
+png("Plots/chromVAR_top_cl_DE_TFs_and_their_binding_motifs.png", height=18, width=48, unit="cm", res=500)
+p0 / p1 / p2
+dev.off()
+
+
+mecom_motifs <- group_by(DA_motifs_ct) %>%
+  filter(symbol == "MECOM") %>%
+  top_n(1, wt = auc)
+
+DefaultAssay(seurat) <- "RNA"
+p0 <- FeaturePlot(seurat,
+                  mecom_motifs$symbol,
+                  reduction = "wnn.umap",
+                  order=T,
+                  cols=blue_colscheme(30),
+                  ncol=4, split.by = "timepoint") & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "chromvar"
+p1 <- FeaturePlot(seurat,
+                  mecom_motifs$feature,
+                  reduction = "wnn.umap",
+                  order=T,
+                  cols=bluered_colscheme(30),
+                  ncol=4, split.by = "timepoint") & NoAxes() & NoLegend()
+
+png("Plots/chromVAR_MECOM_and_its_binding_motif_enrichment_per_timepoint.png", height=18, width=25, unit="cm", res=500)
+p0 / p1
+dev.off()
+
+```
+
+
+# GREAT analysis
+```{r GREAT analysis setup}
+
+# Create a vector with background ranges where all peaks with more than 0.005 detection rate (as per the object peak_cands, generated earlier in this script) 
+idx_ranges <- setNames(1:nrow(seurat@assays$peaks), GRangesToString(seurat@assays$peaks@ranges))
+bg_ranges <- seurat@assays$peaks@ranges[intersect(idx_ranges[peak_cands], grep("^chr",rownames(seurat@assays$peaks)))]
+
+# Merge and rename co-accessible peak modules for each of the 4 cell types we have (others - 1,4,8,13; mesoderm - 2,5,9; endothelial - 0,3,7,10,11,12,15; mural - 6,14)
+celltype <- cl_sig_peaks$res.0.7
+library(stringi)
+celltype <- stri_replace_all_regex(celltype,
+                                  pattern=c("10", "11", "12", "13", "14", "15"),
+                                  replacement=c("Endothelial", "Endothelial", "Endothelial","Other", "Mural", "Endothelial"),
+                                  vectorize=FALSE)
+celltype <- stri_replace_all_regex(celltype,
+                                  pattern=c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"),
+                                  replacement=c("Endothelial", "Other", "Mesoderm", "Endothelial", "Other", "Mesoderm", "Mural", "Endothelial", "Other", "Mesoderm"),
+                                  vectorize=FALSE)
+cl_sig_peaks[["celltype"]] <- celltype
+my_levels <- factor(c("Mesoderm", "Mural", "Endothelial", "Other"))
+cl_sig_peaks$celltype <- factor(cl_sig_peaks$celltype, levels = my_levels)
+
+
+seurat@assays$peaks@meta.features$is_tested <- rownames(seurat@assays$peaks) %in% peak_cands
+seurat@assays$peaks@meta.features$var_proj_cl <- rownames(seurat@assays$peaks) %in% rownames(cl_sig_peaks)
+seurat@assays$peaks@meta.features$cl <- cl_sig_peaks[rownames(seurat@assays$peaks),2]
+# saveRDS(seurat, file="/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/data_processed.seurat.rds")
+
+avg_atac_prof_peak_cl <- sapply(levels(cl_sig_peaks[,2]), function(cl) colMeans(ranks_coefs_sig_peaks[which(cl_sig_peaks[,2]==cl),]))
+
+sig_peaks_ranges <- setNames(lapply(levels(cl_sig_peaks$celltype), function(cl) seurat@assays$peaks@ranges[intersect(idx_ranges[rownames(cl_sig_peaks)[which(cl_sig_peaks$celltype==cl)]], grep("^chr",rownames(seurat@assays$peaks)))] ), levels(cl_sig_peaks$celltype))
+
+sig_peaks_ranges <- lapply(sig_peaks_ranges, function(peak_ranges){
+ x@ranges@start <- as.integer(x@ranges@start) 
+return(peak_ranges)
+ }
+       )
+
+# sig_peaks_ranges$Mesoderm@ranges@start <- as.integer(sig_peaks_ranges$Mesoderm@ranges@start)
+# sig_peaks_ranges$Endothelial@ranges@start <- as.integer(sig_peaks_ranges$Endothelial@ranges@start)
+# sig_peaks_ranges$Mural@ranges@start <- as.integer(sig_peaks_ranges$Mural@ranges@start)
+# sig_peaks_ranges$Other@ranges@start <- as.integer(sig_peaks_ranges$Other@ranges@start)
+
+```
+
+```{r GREAT analysis per co-accessible peak module with resolution 0.7}
+
+# Run GREAT analysis
+res_GREAT_sig_peaks_cl <- setNames(lapply(names(sig_peaks_ranges), function(peak_ranges_cl){
+  message(paste0("start GREAT for cluster ",peak_ranges_cl,"..."))
+  job <- submitGreatJob(gr = sig_peaks_ranges[[peak_ranges_cl]], bg = bg_ranges, species="hg38")
+  tb <- getEnrichmentTables(job)
+  message("done.")
+  if (peak_ranges_cl != names(sig_peaks_ranges)[length(sig_peaks_ranges)]){
+    message("take a break of 60s...")
+    Sys.sleep(60)
+  }
+  return(tb)
+}),names(sig_peaks_ranges))
+
+# Save the results
+saveRDS(res_GREAT_sig_peaks_cl, file="Objects/res.var_peaks_cl_GREAT.rds")
+
+sapply(res_GREAT_sig_peaks_cl, function(x) sapply(x, function(x)
+  sum(x$Hyper_Adjp_BH<0.01 & x$Hyper_Fold_Enrichment>1.7 & x$Hyper_Foreground_Gene_Hits>=5 & x$Hyper_Background_Gene_Hits > 30)))
+
+BP_terms <- sort(unique(unlist(lapply(res_GREAT_sig_peaks_cl, function(x){
+  x <- x[['GO Biological Process']]
+  x <- x[which(x$Hyper_Adjp_BH<0.01 & x$Hyper_Fold_Enrichment>1.7 & x$Hyper_Foreground_Gene_Hits>=5 & x$Hyper_Background_Gene_Hits > 30),]
+  #return(x$name[order(x$Hyper_Fold_Enrichment,decreasing=T)[0:min(c(5,nrow(x)))]])
+  return(x$name)
+}))))
+mat <- sapply(res_GREAT_sig_peaks_cl, function(x){
+  x <- x[['GO Biological Process']]
+  x <- setNames((log(x$Hyper_Fold_Enrichment))[x$name %in% BP_terms], x$name[x$name %in% BP_terms])[BP_terms]
+})
+mat[mat < -max(mat)] <- -max(mat)
+hcl <- hclust(as.dist(1-cor(t(mat))), method="ward.D2")
+
+
+pdf("Plots/heatmap_peak_cl_GREAT-BP.pdf")
+gplots::heatmap.2(mat[,order(apply(avg_atac_prof_peak_cl,2,which.max))], Rowv=as.dendrogram(hcl), Colv=NA, dendrogram = "none", scale="none", trace="none", key=F, keysize=0.2, col=rev(purplegreen_colscheme(30)), margins = c(5,21), cexCol = 1.3, cexRow = 0.4)
+cl_terms <- cutree(hcl, h = max(hcl$height) * 0.1)
+size_terms <- setNames(res_GREAT_sig_peaks_cl$`0`$`GO Biological Process`$Hyper_Background_Gene_Hits, res_GREAT_sig_peaks_cl$`0`$`GO Biological Process`$name)
+BP_terms_sel <- sapply(sort(unique(cl_terms)), function(x) names(which(cl_terms==x))[which.max(size_terms[names(which(cl_terms==x))])])
+hcl <- hclust(as.dist(1-cor(t(mat[BP_terms_sel,]))), method="ward.D2")
+gplots::heatmap.2(mat[BP_terms_sel,order(apply(avg_atac_prof_peak_cl,2,which.max))], Rowv=as.dendrogram(hcl), Colv=NA, dendrogram = "none", scale="none", trace="none", key=F, keysize=0.2, col=rev(purplegreen_colscheme(30)), margins = c(5,21), cexCol = 1.3, cexRow = 1)
+dev.off()
+
+```
+
+```{r GREAT analysis per cell type}
+
+# Run GREAT analysis
+res_GREAT_sig_peaks_cl <- setNames(lapply(names(sig_peaks_ranges), function(cl){
+  message(paste0("start GREAT for cluster ",cl,"..."))
+  job <- submitGreatJob(gr = sig_peaks_ranges[[cl]], bg = bg_ranges, species="hg38")
+  tb <- getEnrichmentTables(job)
+  message("done.")
+  if (cl != names(sig_peaks_ranges)[length(sig_peaks_ranges)]){
+    message("take a break of 60s...")
+    Sys.sleep(60)
+  }
+  return(tb)
+}),names(sig_peaks_ranges))
+
+# Save the results
+saveRDS(res_GREAT_sig_peaks_cl, file="Objects/res.var_peaks_cl_GREAT_celltype.rds")
+
+sapply(res_GREAT_sig_peaks_cl, function(x) sapply(x, function(x)
+  sum(x$Hyper_Adjp_BH<0.01 & x$Hyper_Fold_Enrichment>1 & x$Hyper_Foreground_Gene_Hits>=20 & x$Hyper_Background_Gene_Hits > 30)))
+
+# Filter for Biological Process only based on padjusted value, foreground and background gene number and fold enrichment
+BP_terms <- sort(unique(unlist(lapply(res_GREAT_sig_peaks_cl, function(x){
+  x <- x[['GO Biological Process']]
+  x <- x[which(x$Hyper_Adjp_BH<0.01 & x$Hyper_Fold_Enrichment>1.2 & x$Hyper_Foreground_Gene_Hits>=20 & x$Hyper_Background_Gene_Hits > 30),]
+  return(x$name)
+}))))
+
+# Create a mqtrix with the GP terms for each celltype
+mat <- sapply(res_GREAT_sig_peaks_cl, function(x){
+  x <- x[['GO Biological Process']]
+  x <- setNames((log(x$Hyper_Fold_Enrichment))[x$name %in% BP_terms], x$name[x$name %in% BP_terms])[BP_terms]
+})
+mat[mat < -max(mat)] <- -max(mat)
+hcl <- hclust(as.dist(1-cor(t(mat))), method="ward.D2")
+
+pdf("Plots/heatmap_peak_cl_GREAT-BP_celltype.pdf")
+gplots::heatmap.2(mat[,order(apply(avg_atac_prof_peak_cl,2,which.max))], Rowv=as.dendrogram(hcl), Colv=NA, dendrogram = "none", scale="none", trace="none", key=F, keysize=0.2, col=rev(purplegreen_colscheme(30)), margins = c(5,21), cexCol = 1.3, cexRow = 0.4)
+cl_terms <- cutree(hcl, h = max(hcl$height) * 0.1)
+size_terms <- setNames(res_GREAT_sig_peaks_cl$Endothelial$`GO Biological Process`$Hyper_Foreground_Gene_Hits, res_GREAT_sig_peaks_cl$Endothelial$`GO Biological Process`$name)
+BP_terms_sel <- sapply(sort(unique(cl_terms)), function(x) names(which(cl_terms==x))[which.max(size_terms[names(which(cl_terms==x))])])
+hcl <- hclust(as.dist(1-cor(t(mat[BP_terms_sel,]))), method="ward.D2")
+gplots::heatmap.2(mat[BP_terms_sel,order(apply(avg_atac_prof_peak_cl,2,which.max))], Rowv=as.dendrogram(hcl), Colv=NA, dendrogram = "none", scale="none", trace="none", key=F, keysize=0.2, col=rev(purplegreen_colscheme(30)), margins = c(5,21), cexCol = 1.3, cexRow = 1)
+dev.off()
+
+
+# Add a column with the celltype to each object
+res_GREAT_sig_peaks_cl$Mesoderm <- lapply(res_GREAT_sig_peaks_cl$Mesoderm, function(x){
+ x$Celltype <- "Mesoderm"
+return(x)})
+
+res_GREAT_sig_peaks_cl$Endothelial <- lapply(res_GREAT_sig_peaks_cl$Endothelial, function(x){
+ x$Celltype <- "Endothelial"
+return(x)})
+
+res_GREAT_sig_peaks_cl$Mural <- lapply(res_GREAT_sig_peaks_cl$Mural, function(x){
+ x$Celltype <- "Mural"
+return(x)})
+
+res_GREAT_sig_peaks_cl$Other <- lapply(res_GREAT_sig_peaks_cl$Other, function(x){
+ x$Celltype <- "Other"
+return(x)})
+
+# Generate a list of filtered data frames for all GOs for all cell types
+filtered_res_GREAT_sig_peaks_cl <- lapply(res_GREAT_sig_peaks_cl, function(x){
+  x$`GO Biological Process` <- x$`GO Biological Process` %>% 
+    filter(Hyper_Adjp_BH<0.01 & Hyper_Foreground_Gene_Hits>=20 & Hyper_Background_Gene_Hits > 30)
+  x$`GO Biological Process`$GO <- "Biological Process"
+  x$`GO Molecular Function` <- x$`GO Molecular Function` %>% 
+    filter(Hyper_Adjp_BH<0.01 & Hyper_Foreground_Gene_Hits>=20 & Hyper_Background_Gene_Hits > 30)
+  x$`GO Molecular Function`$GO <- "Molecular Function"
+  x$`GO Cellular Component` <- x$`GO Cellular Component` %>% 
+    filter(Hyper_Adjp_BH<0.01 & Hyper_Foreground_Gene_Hits>=20 & Hyper_Background_Gene_Hits > 30)
+  x$`GO Cellular Component`$GO <- "Cellular Component"
+return(x) })
+
+# Generate of the lits, further filtered for the top 10 processes in each category (BP, MF, CC)
+filtered_res_GREAT_sig_peaks_cl_top10 <- lapply(filtered_res_GREAT_sig_peaks_cl, function(x){
+  x$`GO Biological Process` <- x$`GO Biological Process` %>%  top_n(10, wt = -Hyper_Adjp_BH)
+  x$`GO Molecular Function` <- x$`GO Molecular Function` %>%  top_n(10, wt = -Hyper_Adjp_BH)
+  x$`GO Cellular Component` <- x$`GO Cellular Component` %>%  top_n(10, wt = -Hyper_Adjp_BH)
+return(x)
+})
+  
+# Bubble/dot plot data frame prep
+  mural_GO <- rbind(as.data.frame(filtered_res_GREAT_sig_peaks_cl$Mural$`GO Molecular Function`) %>% mutate(GO = "MF"), 
+                  as.data.frame(filtered_res_GREAT_sig_peaks_cl$Mural$`GO Biological Process`) %>% mutate(GO = "BP"),  
+                  as.data.frame(filtered_res_GREAT_sig_peaks_cl$Mural$`GO Cellular Component`) %>% mutate(GO = "CC"))
+  endo_GO <- rbind(as.data.frame(filtered_res_GREAT_sig_peaks_cl$Endothelial$`GO Molecular Function`) %>% mutate(GO = "MF"), 
+                 as.data.frame(filtered_res_GREAT_sig_peaks_cl$Endothelial$`GO Biological Process`) %>% mutate(GO = "BP"),  
+                 as.data.frame(filtered_res_GREAT_sig_peaks_cl$Endothelial$`GO Cellular Component`) %>% mutate(GO = "CC"))
+  mesoderm_GO <- rbind(as.data.frame(filtered_res_GREAT_sig_peaks_cl$Mesoderm$`GO Molecular Function`) %>% mutate(GO = "MF"), 
+                     as.data.frame(filtered_res_GREAT_sig_peaks_cl$Mesoderm$`GO Biological Process`) %>% mutate(GO = "BP"),  
+                     as.data.frame(filtered_res_GREAT_sig_peaks_cl$Mesoderm$`GO Cellular Component`) %>% mutate(GO = "CC"))
+  other_GO <- rbind(as.data.frame(filtered_res_GREAT_sig_peaks_cl$Other$`GO Molecular Function`) %>% mutate(GO = "MF"), 
+                  as.data.frame(filtered_res_GREAT_sig_peaks_cl$Other$`GO Biological Process`) %>% mutate(GO = "BP"),  
+                  as.data.frame(filtered_res_GREAT_sig_peaks_cl$Other$`GO Cellular Component`) %>% mutate(GO = "CC"))
+  all_GO <- rbind(mural_GO, endo_GO, mesoderm_GO, other_GO)
+# Save the list with all GREAT terms per cell type and per GO (for final ms)  
+  write.csv(all_GO, "Plots/GREAT_GO_per_cell_type.csv")
+
+  list_GO <- list(mural_GO, endo_GO, mesoderm_GO, other_GO)
+
+
+# Select and plot specific GREAT terms to be labeled on the plots for each cell type
+# Mesoderm cells
+mesoderm_GO[order(-mesoderm_GO$Hyper_Fold_Enrichment),]
+mesoderm_names <- c("heart morphogenesis","mesenchyme development","embryonic digit morphogenesis","frizzled binding", "mesoderm morphogenesis")
+mesoderm_names <- mesoderm_GO %>% filter(name %in% mesoderm_names)
+# Endothelial cells
+endo_GO[order(endo_GO$Hyper_Adjp_BH),]
+endo_names <- c("ferric iron transport","regulation of sprouting angiogenesis","positive regulation of phospholipid metabolic process","cellular response to oxidative stress","transforming growth factor beta receptor signaling pathway","cell-substrate junction","positive regulation of lipid kinase activity","leukocyte chemotaxis","endothelium development")
+endo_names <- endo_GO %>% filter(name %in% endo_names)
+# Mural cells
+mural_GO[order(mural_GO$Hyper_Adjp_BH),]
+mural_names <- c("response to vitamin D", "positive regulation of endothelial cell proliferation","collagen catabolic process","positive regulation of carbohydrate metabolic process","regulation of blood vessel diameter","extracellular matrix organization")
+mural_names <- mural_GO %>% filter(name %in% mural_names)
+# Other cells
+other_GO[order(-other_GO$Hyper_Fold_Enrichment),]
+other_names <- c("developmental process", "positive regulation of ossification","epithelium development","BMP signaling pathway","beta-catenin-TCF complex assembly","cortical cytoskeleton organization")
+other_names <- other_GO %>% filter(name %in% other_names)
+
+
+# GO bubbleplot
+pdf("Plots/GREAT_analysis_bubbleplot_by_celltype_labeled.pdf", height = 4, width = 6)
+lapply(list_GO, function(GO_df) {ggplot(GO_df, aes(x = Hyper_Fold_Enrichment, y = -log10(Hyper_Adjp_BH), size=Hyper_Region_Set_Coverage, fill=GO)) +
+    geom_point(alpha=0.5, shape=21) +
+    scale_size(range = c(.1, 13), name="Hyper_Region_Set_Coverage") +
+    theme(legend.position="bottom") +
+    scale_fill_manual(values = prettyrainbow_colscheme(3)) +
+    ylab("-log10(Hyper_Adjp_BH)") +
+    xlab("Hyper_Fold_Enrichment") +
+    theme_bw() + 
+    ggtitle(paste0(GO_df$Celltype," ", "cell GREAT enrichment")) + 
+    geom_text(data = head(subset(GO_df, Hyper_Fold_Enrichment > 1.3 | -log10(Hyper_Adjp_BH) > 5),10), aes(Hyper_Fold_Enrichment, -log10(Hyper_Adjp_BH), label=name), size = 3, max.overlaps = 20)
+})
+dev.off()
+
+pdf("Plots/GREAT_analysis_bubbleplot_Mesoderm_labeled.pdf", height = 4, width = 6)
+ggplot(mesoderm_GO, aes(x = Hyper_Fold_Enrichment, y = -log10(Hyper_Adjp_BH), size=Hyper_Region_Set_Coverage, fill=GO)) +
+    geom_point(alpha=0.5, shape=21) +
+    geom_point(data=mesoderm_names, aes(x=Hyper_Fold_Enrichment,y=-log10(Hyper_Adjp_BH)), color='red',size=3) +
+    scale_size(range = c(.1, 13), name="Hyper_Region_Set_Coverage") +
+    theme(legend.position="bottom") +
+    scale_fill_manual(values = prettyrainbow_colscheme(3)) +
+    ylab("-log10(Hyper_Adjp_BH)") +
+    xlab("Hyper_Fold_Enrichment") +
+    theme_bw() + 
+    ggtitle("Mesoderm cells GREAT enrichment") + 
+    # geom_text(data = head(subset(endo_GO, Hyper_Fold_Enrichment > 1.3 | -log10(Hyper_Adjp_BH) > 5),10), aes(Hyper_Fold_Enrichment, -log10(Hyper_Adjp_BH), label=name), size = 3, max.overlaps = 20) +
+   geom_label_repel(data = mesoderm_names, mapping = aes(Hyper_Fold_Enrichment, -log10(Hyper_Adjp_BH), label = name), size = 3)
+dev.off()
+
+pdf("Plots/GREAT_analysis_bubbleplot_Endo_labeled.pdf", height = 4, width = 6)
+ggplot(endo_GO, aes(x = Hyper_Fold_Enrichment, y = -log10(Hyper_Adjp_BH), size=Hyper_Region_Set_Coverage, fill=GO)) +
+    geom_point(alpha=0.5, shape=21) +
+    geom_point(data=endo_names, aes(x=Hyper_Fold_Enrichment,y=-log10(Hyper_Adjp_BH)), color='red',size=3) +
+    scale_size(range = c(.1, 13), name="Hyper_Region_Set_Coverage") +
+    theme(legend.position="bottom") +
+    scale_fill_manual(values = prettyrainbow_colscheme(3)) +
+    ylab("-log10(Hyper_Adjp_BH)") +
+    xlab("Hyper_Fold_Enrichment") +
+    theme_bw() + 
+    ggtitle("Endothelial cells GREAT enrichment") + 
+   geom_label_repel(data = endo_names, mapping = aes(Hyper_Fold_Enrichment, -log10(Hyper_Adjp_BH), label = name), size = 3)
+dev.off()
+
+pdf("Plots/GREAT_analysis_bubbleplot_Mural_labeled.pdf", height = 4, width = 6)
+ggplot(mural_GO, aes(x = Hyper_Fold_Enrichment, y = -log10(Hyper_Adjp_BH), size=Hyper_Region_Set_Coverage, fill=GO)) +
+    geom_point(alpha=0.5, shape=21) +
+    geom_point(data=mural_names, aes(x=Hyper_Fold_Enrichment,y=-log10(Hyper_Adjp_BH)), color='red',size=3) +
+    scale_size(range = c(.1, 13), name="Hyper_Region_Set_Coverage") +
+    theme(legend.position="bottom") +
+    scale_fill_manual(values = prettyrainbow_colscheme(3)) +
+    ylab("-log10(Hyper_Adjp_BH)") +
+    xlab("Hyper_Fold_Enrichment") +
+    theme_bw() + 
+    ggtitle("Mural cells GREAT enrichment") + 
+   geom_label_repel(data = mural_names, mapping = aes(Hyper_Fold_Enrichment, -log10(Hyper_Adjp_BH), label = name), size = 3)
+dev.off()
+
+pdf("Plots/GREAT_analysis_bubbleplot_Other_labeled.pdf", height = 4, width = 6)
+ggplot(other_GO, aes(x = Hyper_Fold_Enrichment, y = -log10(Hyper_Adjp_BH), size=Hyper_Region_Set_Coverage, fill=GO)) +
+    geom_point(alpha=0.5, shape=21) +
+    geom_point(data=other_names, aes(x=Hyper_Fold_Enrichment,y=-log10(Hyper_Adjp_BH)), color='red',size=3) +
+    scale_size(range = c(.1, 13), name="Hyper_Region_Set_Coverage") +
+    theme(legend.position="bottom") +
+    scale_fill_manual(values = prettyrainbow_colscheme(3)) +
+    ylab("-log10(Hyper_Adjp_BH)") +
+    xlab("Hyper_Fold_Enrichment") +
+    theme_bw() + 
+    ggtitle("Other cells GREAT enrichment") + 
+   geom_label_repel(data = other_names, mapping = aes(Hyper_Fold_Enrichment, -log10(Hyper_Adjp_BH), label = name), size = 3)
+dev.off()
+
+# DotPlot biological process for each cell type separately
+p0 <- ggplot(data = filtered_res_GREAT_sig_peaks_cl_top10$Mesoderm$`GO Biological Process`, aes(x = Hyper_Fold_Enrichment, y = paste0(ID," ",name), 
+                        color = `Hyper_Adjp_BH`, size = Hyper_Region_Set_Coverage)) + 
+  geom_point() +
+  scale_color_gradientn(colours = rev(bluered_colscheme(30))) +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") +
+  ggtitle("GREAT enrichment of Mesoderm (GO BP)")
+
+p1 <- ggplot(data = filtered_res_GREAT_sig_peaks_cl_top10$Mural$`GO Biological Process`, aes(x = Hyper_Fold_Enrichment, y = paste0(ID," ",name), 
+                        color = `Hyper_Adjp_BH`, size = Hyper_Region_Set_Coverage)) + 
+  geom_point() +
+  scale_color_gradientn(colours = rev(bluered_colscheme(30))) +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("GREAT enrichment  of Mural cells (GO BP)")
+
+# Oxidative stress mediates the conversion of endothelial cells into myofibroblasts via a TGF-β1 and TGF-β2-dependent pathway.
+p2 <- ggplot(data = filtered_res_GREAT_sig_peaks_cl_top10$Endothelial$`GO Biological Process`, aes(x = Hyper_Fold_Enrichment, y = paste0(ID," ",name), 
+                        color = `Hyper_Adjp_BH`, size = Hyper_Region_Set_Coverage)) + 
+  geom_point() +
+  scale_color_gradientn(colours = rev(bluered_colscheme(30))) +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("GREAT enrichment of Endothelial cells (GO BP)")
+
+p3 <- ggplot(data = filtered_res_GREAT_sig_peaks_cl_top10$Other$`GO Biological Process`, aes(x = Hyper_Fold_Enrichment, y = paste0(ID," ",name), 
+                        color = `Hyper_Adjp_BH`, size = Hyper_Region_Set_Coverage)) + 
+  geom_point() +
+  scale_color_gradientn(colours = rev(bluered_colscheme(30))) +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("GREAT enrichment of Other cells (GO BP)") 
+
+
+pdf("Plots/GREAT_BP_dotplot_sep_scale.pdf", height = 23, width = 10)
+p0 / p1 / p2 / p3
+dev.off()
+
+
+BP_df_top10 <- rbind(as.data.frame(filtered_res_GREAT_sig_peaks_cl_top10$Mesoderm$`GO Biological Process`), as.data.frame(filtered_res_GREAT_sig_peaks_cl_top10$Mural$`GO Biological Process`),  as.data.frame(filtered_res_GREAT_sig_peaks_cl_top10$Endothelial$`GO Biological Process`),  as.data.frame(filtered_res_GREAT_sig_peaks_cl_top10$Other$`GO Biological Process`))
+p <- ggplot(data = BP_df_top10, aes(x = Hyper_Fold_Enrichment, y = paste0(ID," ",name), 
+                        color = `Hyper_Adjp_BH`, size = Hyper_Region_Set_Coverage)) + 
+  geom_point() +
+  scale_color_gradientn(colours = rev(bluered_colscheme(30))) +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("GREAT enrichment analysis") 
+pdf("Plots/GREAT_BP_dotplot.pdf", height = 25, width = 10)
+p + facet_wrap(~Celltype, ncol = 1)
+dev.off()
+
+
+plot +
+  geom_label_repel(data = sig_res, mapping = aes(log2FoldChange, -log10(padj), label = DEG), size = 3, max.overlaps = 20)
+
+```
+
+# cisTopic
+cisTopic is an R/Bioconductor package for the simultaneous identification of cis-regulatory topics and cell states from single cell epigenomics data. cisTopic relies on an algorithm called Latent Dirichlet Allocation (LDA), a robust Bayesian method used in text mining to group documents addressing similar topics and related words into topics. Interestingly, this model has a series of assumptions that are fulfilled in single-cell epigenomics data, such as non-ordered features (‘bag of words’) and the allowance of overlapping topics (i.e. a regulatory region can be co-accessible with different other regions depending on the context, namely, the cell type or state).
+
+cisTopic now uses the WarpLDA implementation for topic modelling (Chen et al, 2016), where each region in each cell is assigned to a topic based on (1) to which topic the region is assigned in other cells and (2) to which topics the regions are assigned in that cell. In comparison to Collapsed Gibbs Smpling, both counts are fixed after all tokens are sampled, allowing to randomly access regions in cells for assignment; while with a CGS we need to update the counts after each assignment before making the next assignment. After a number of iterations through the data set, these assignments are used to estimate the probability of a region belonging to a cis-regulatory topic (region-topic distribution) and the contributions of a topic within each cell (topic-cell distribution). These distributions can in turn be used to cluster cells and identify cell types, and to analyse the regulatory sequences in each topic.
+
+cisTopic consists of 4 main steps: (1) generation of a binary accessibility matrix as input for LDA; (2) LDA and model selection; (3) cell state identification using the topic-cell distributions from LDA and (4) exploration of the region-topic distributions.
+
+```{r cisTopic}
+
+devtools::install_github("aertslab/RcisTarget")
+devtools::install_github("aertslab/AUCell")
+devtools::install_github("aertslab/cisTopic")
+
+## cisTopic for denoising
+suppressWarnings(library(cisTopic))
+
+# cells as columns, regions as cells and fragments/reads counts as values
+counts <- seurat[['peaks']]@counts
+rownames(counts) <- sub("\\-",":",rownames(counts))
+
+# Starting from the peak calling count matrix, we generate a binary accessibility matrix as input for Latent Drichlet Allocation (LDA). The rownames of these matrix must contain the region coordinates in position format (e.g. chr1:123456-134567)
+cisTopicObject <- createcisTopicObject(counts, project.name='multiome')
+
+# Now we use LDA for the modelling of cis-regulatory topics. LDA allows to derive, from the original high-dimensional data the probability distributions over the topics for each cell and the probability distributions over the regions for each topic.
+# These distributions indicate, respectively, how important a regulatory topic is for a cell, and how important regions are for the regulatory topics.
+# WarpLDA assigns regions to a certain topic by randomly sampling from a distributions where the probability of a region being assigned to a topic is proportional to the contributions of that region to the topic and the contribution of that topic in a cell
+# runWarpLDAModels() builds several models (e.g. with different numbers of topics) using LDA on the binary accessibility matrix (automatically stored in the initialzed cisTopicObject).
+cisTopicObject <- runWarpLDAModels(cisTopicObject, topic=c(2, 5, 10:25, 30, 35, 40), seed=987, nCores=21, iterations = 500, addModels=FALSE)
+
+# Let us save the cisTopicObject
+saveRDS(cisTopicObject, file = "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/peaks.cistopic.rds")
+
+# Let us select the best model using selectModel()
+pdf("Plots/cisTopic_model_sel.pdf")
+par(mfrow=c(3,3))
+cisTopicObject <- selectModel(cisTopicObject, type='maximum')
+cisTopicObject <- selectModel(cisTopicObject, type='perplexity')
+cisTopicObject <- selectModel(cisTopicObject, type='derivative')
+dev.off()
+cisTopicObject <- selectModel(cisTopicObject, select = 14)
+
+# The data is represented as a matrix with cells as columns, topics as rows and contributions as values
+
+# Enrichment of epigenomic signatures in the cells
+# Next, we calculate the probability of each region in each cell, by multiplying the cell and topic assignments (i.e. predictive distribution)
+# This is done with predictiveDistribution() and returns a matrix where the rows are the regions, the columns are the cells, and the values are the probabilites of seeing a region in a matrix
+# This matrix is stored in object@predictive.distribution
+# These distributions can be used to estimate drop-outs and build cell-specific region rankings that can be used with AUCell for estimating the enrichment of epigenomic signatures within the cells
+mat_pred <- predictiveDistribution(cisTopicObject)
+rownames(mat_pred) <- sub(":","-",rownames(mat_pred))
+seurat[['peaks_cisTopic']] <- CreateChromatinAssay(data = mat_pred,
+                                                  fragments = seurat[['peaks']]@fragments,
+                                                  annotation = seurat[['peaks']]@annotation)
+topics <- t(cisTopicObject@selected.model$document_sums)
+seurat[['cisTopic']] <- CreateDimReducObject(topics, key="CISTOPIC_", assay = "peaks_cisTopic")
+saveRDS(seurat, file="/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/data_processed.seurat.rds")
+
+## integration based on the cisTopic data
+### doesn't look good, deleted and skipped
+
+```
+
+
+# GRN inference with Pando
+
+Pando leverages multi-modal single-cell measurements to infer gene regulatory networks (GRNs) using a flexible modelling framework. By modeling the relationship between TF-binding site pairs with the expression of target genes, Pando simultaneously infers gene modules and sets of regulatory regions for each transcription factor.
+1. Scans for TF binding motifs each peak in the ATAC assay of the scMultiome data.
+2. Filters further based on sequence conservation and public regulatory element databases (e.g. ENCODE).
+3. For each gene it builds a linear regression model, considering not only the expression of those TFs with predicted binding sites that may regulate the gene, but also its interaction with the peak accessibility where the putative TF binding site is located.
+
+```{r Pando}
+
+# Initialize the GRN
+seurat <- initiate_grn(seurat,
+                       regions=phastConsElements20Mammals.UCSC.hg38,
+                       rna_assay = "RNA", peak_assay = "peaks_cisTopic")
+# This creates a RegulatoryNetwork object inside the Seurat object and selects candidate regulatory regions
+# phastConsElements20Mammals.UCSC.hg38 is a set of conserved regions that comes with Pando package and constrains the set of peaks
+# to more confident regions, cutting down on runtime and making the resulting GRN more robust
+# The sequence conservation information in the form of phastCons scores is derived from multi-species whole genome alignment and ranged between 0 and 1, with 1 meaning identical in all genomes
+
+# We can also inspect the candidate regulatory regions that we have selected:
+regions <- NetworkRegions(seurat)
+regions@ranges
+regions@motifs@data[1:5,1:5]
+
+# Scan for TF binding motifs in the candidate regulatory regions (where TFs potentially bind) - this is done by calling the AddMotifs function from Signac
+# and incorporate the TF binding motif information into the object
+seurat <- find_motifs(seurat,
+                      pfm = Pando::motifs, # a custom motif database (motifs) compiled from JASPAR and CIS-BP
+                      motif_tfs = Pando::motif2tf, # a data frame with motif-to-TF assignments
+                      genome = BSgenome.Hsapiens.UCSC.hg38)
+
+# Pando supports any multithreads parallelization method in R that implements the foreach function
+# Here we use the doParallel package to run Pando with 50 cores
+library(doParallel)
+DefaultAssay(seurat) <- "RNA"
+
+registerDoParallel(50)
+
+# Here, we first select regions near genes, either by simply considering a distance upstream and/or downstream of the gene (peak_to_gene_method='Signac') or by also considering overlapping regulatory regions as is done by GREAT (peak_to_gene_method='GREAT').
+# Then we fit a linear model for each gene on its log-normalized expression based on all candidate TF-binding site interactions.
+# The fitted coefficients are tested for significance using ANOVA, followed by BH multiple test correction to obtain an FDR-adjusted P value, to which a significance threshold of 0.05 is applied.
+seurat <- infer_grn(seurat,
+                           parallel = T,
+                           tf_cor = 0.05, # Pre-filter only TFs with sufficient correlation with the genes in the model; peak_cor does similar pre-filtering but for the peaks
+                           method="glm",
+                           family="gaussian",
+                          genes = VariableFeatures(seurat),
+                           scale=F,
+                           verbose=2) # peak_to_gene_method, upstream, downstream, and extend together determine which peaks are linked to a gene
+                                      # The method parameter claims the regression model to use
+
+# Once the models are fit, model coefficients can be inspected
+coef(seurat)
+
+# Based on the model coefficients, we can construct a network between TFs and target genes. This can be further summarized to construct gene and regulatory modules with the set of target genes and regulatory regions for each TF.
+seurat <- find_modules(seurat)
+
+# Access the extracted modules
+modules <- NetworkModules(seurat)
+modules@meta
+
+seurat@grn
+
+# PLot the goodness-of-fit metrics 
+# This shows us the explained variance (R^2) of the model, as well as the number of variables in each model
+# We can observe that with more variables, the models will have a better fit
+# The dashed lines show the applied thresholds for in find_modules()
+pdf("Plots/pando_plot_gof.pdf")
+plot_gof(seurat, point_size=3)
+dev.off()
+
+# Plot the size of the modules with respect to the number of target genes as well as the number of peaks in regulating TFs
+pdf("Plots/pando_plot_module_metrics.pdf")
+plot_module_metrics(seurat)
+dev.off()
+
+seurat <- get_network_graph(seurat)
+
+saveRDS(seurat, file="/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/data_pando.seurat.rds")
+
+```
+
+```{r plot networks}
+
+pdf("Plots/pando_GRN_UMAP_cisTopic.pdf", height = 15, width = 20)
+plot_network_graph(seurat, node_color = col_cl)
+dev.off()
+
+seurat <- get_network_graph(
+    seurat, 
+    graph_name = 'full_graph', 
+    umap_method = 'none'
+)
+
+```
+
+On the basis of the GRN inferred by Pando, the activity of a transcription factor can be represented by the expression of the set of genes that it regulates (gene modules)
+```{r get gene modules}
+
+coefs <- as.data.frame(seurat@grn@networks$glm_network@coefs)
+rownames(coefs) <- paste(coefs$tf, coefs$region, coefs$target, sep="_")
+coef_grn <- coefs
+
+# Extract the TF-peak-target trios with significant p-values
+grn <- seurat@grn@networks$glm_network@coefs %>%
+  filter(padj < 0.01)
+# Save GRN object 
+saveRDS(grn, file="Objects/res.GRN_glm.rds")
+# Save GRN table
+write.csv(seurat@grn@networks$glm_network@coefs, "Plots/pando_GRN_TF-peak-target_trios.csv")
+write.csv(grn, "Plots/pando_GRN_significant_TF-peak-target_trios.csv")
+
+# The activity of a transcription factor can be represented by the expression of the set of genes that it regulates (gene modules) or by the accessibility of its set of regulatory regions (regulatory modules)
+# Generate a list of regulons (genes which are co-regulated positively or negatively by the same TF)
+positive_regulons <- lapply(split(grn, grn$tf), function(x) sort(unique(x$target[x$estimate > 0])))
+positive_regulons <- positive_regulons[lengths(positive_regulons) >= 10]
+negative_regulons <- lapply(split(grn, grn$tf), function(x) sort(unique(x$target[x$estimate < 0])))
+negative_regulons <- negative_regulons[lengths(negative_regulons) >= 10]
+
+# To calculate the activity of gene modules, we used the Seurat function AddModuleScore() with all genes included in GRN inference as the background (pool)
+# Use the AddModuleScore in Seurat to calculate the regulon activity score for each regulon in each cell
+DefaultAssay(seurat) <- "RNA"
+module_scores_pos <- AddModuleScore(seurat,
+                              features = positive_regulons,
+                              name = "regulon_")@meta.data
+module_scores_pos <- module_scores_pos[,grep("^regulon_", colnames(module_scores_pos))] %>%
+  setNames(paste0(names(positive_regulons),"(+)"))
+module_scores_neg <- AddModuleScore(seurat,
+                              features = negative_regulons,
+                              name = "regulon_")@meta.data
+module_scores_neg <- module_scores_neg[,grep("^regulon_", colnames(module_scores_neg))] %>%
+  setNames(paste0(names(negative_regulons),"(-)"))
+
+# Incorporate this information into the Seurat object as an extra assay called 'regulon'
+seurat[['regulon']] <- CreateAssayObject(data = t(cbind(module_scores_pos, module_scores_neg)))
+
+# Save the new pando object
+saveRDS(seurat, file="Objects/data_pando.seurat.rds")
+
+# Do the feature plots for the top TFs (the same we found combining DE and chromVAR analysis plus some more), and their positive and negative regulons
+top5_tfs_ct <- group_by(marker_tfs_ct, group_tf) %>%
+  top_n(5, wt = auc_motif)
+
+DefaultAssay(seurat) <- "RNA"
+p0 <- FeaturePlot(seurat,
+                  top5_tfs_ct$feature,
+                  reduction = "wnn.umap",
+                  cols = blue_colscheme(30),
+                  order = T,
+                  ncol = 5) & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "regulon"
+p1 <- FeaturePlot(seurat,
+                  features = c(intersect(paste0(top5_tfs_ct$feature,"(+)"), rownames(seurat)),
+                               intersect(paste0(top5_tfs_ct$feature,"(-)"), rownames(seurat))),
+                  reduction = "wnn.umap",
+                  cols = bluered_colscheme(30),
+                  order = T,
+                  ncol = 5) & NoAxes() & NoLegend()
+
+
+png("Plots/grn_top5_cl_DE_TFs_and_their_regulons.png", height=99, width=40, unit="cm", res=500)
+(p0 / p1) #+ patchwork::plot_layout(height = c(2,2))
+dev.off()
+
+png("Plots/grn_top5_cl_DE_TFs.png", height=36, width=40, unit="cm", res=500)
+p0 
+dev.off()
+
+png("Plots/grn_top5_cl_DE_regulons.png", height=63, width=40, unit="cm", res=500)
+p1 
+dev.off()
+
+
+DefaultAssay(seurat) <- "RNA"
+p0 <- FeaturePlot(seurat,
+                  "MECOM",
+                  reduction = "wnn.umap",
+                  cols = blue_colscheme(30),
+                  order = T,
+                  ncol = 1) & NoAxes() & NoLegend()
+DefaultAssay(seurat) <- "regulon"
+p1 <- FeaturePlot(seurat,
+                  features = c(intersect(paste0("MECOM","(+)"), rownames(seurat)),
+                               intersect(paste0("MECOM","(-)"), rownames(seurat))),
+                  reduction = "wnn.umap",
+                  cols = bluered_colscheme(30),
+                  order = T,
+                  ncol = 3, split.by = "timepoint") & NoAxes() & NoLegend()
+p2 <- FeaturePlot(seurat,
+                  features = c(intersect(paste0("MECOM","(+)"), rownames(seurat)),
+                               intersect(paste0("MECOM","(-)"), rownames(seurat))),
+                  reduction = "wnn.umap",
+                  cols = bluered_colscheme(30),
+                  order = T,
+                  ncol = 1) & NoAxes() & NoLegend()
+
+
+png("Plots/MECOM_feature_plot.png", height=9, width=8, unit="cm", res=500)
+p0  
+dev.off()
+
+png("Plots/grn_MECOM_regulons_per_timepoint.png", height=18, width=25, unit="cm", res=500)
+p1 
+dev.off()
+
+png("Plots/grn_MECOM_regulons.png", height=18, width=8, unit="cm", res=500)
+p2
+dev.off()
+
+```
+
+```{r regulatory modules}
+
+# Regulatory modules are defined by the accessibility of the GRN set of regulatory regions
+# chromVAR can be used to obtain a set of background oeaks (getBackgroundPeaks())
+# Then the deviations in accessibility from background peak can be computed for each regulatory module with computeDeviations()
+tf_regions <- lapply(split(grn, grn$tf), function(x) sort(unique(x$region)))
+region2idxpeaks <- setNames(seurat@grn@regions@peaks, GRangesToString(seurat@grn@regions@ranges))
+tf_peaks <- lapply(tf_regions, function(x) setdiff(region2idxpeaks[x],
+                                                   which(!seqnames(seurat@assays$peaks@ranges) %in% intersect(levels(seurat@assays$peaks@ranges@seqnames), seqnames(BSgenome.Hsapiens.UCSC.hg38)))))
+seurat_shared_chr <- subset(CreateSeuratObject(seurat[['peaks']], assay = "peaks"), features = rownames(seurat[['peaks']])[which(seqnames(seurat@assays$peaks@ranges) %in% intersect(levels(seurat@assays$peaks@ranges@seqnames), seqnames(BSgenome.Hsapiens.UCSC.hg38)))])
+seurat_shared_chr@assays$peaks@ranges <- keepSeqlevels(seurat_shared_chr@assays$peaks@ranges, levels(droplevels(seqnames(seurat_shared_chr@assays$peaks@ranges))))
+mat_peaks_tf <- sparseMatrix(i = unlist(tf_peaks),
+                             j = rep(1:length(tf_peaks), lengths(tf_peaks)),
+                             dims = c(nrow(seurat_shared_chr@assays$peaks), length(tf_peaks)),
+                             dimnames = list(rownames(seurat_shared_chr@assays$peaks), names(tf_peaks)))
+seurat_shared_chr <- RunChromVAR(seurat_shared_chr, genome = BSgenome.Hsapiens.UCSC.hg38, motif.matrix = mat_peaks_tf, assay = "peaks", new.assay.name = "module_chromvar")
+
+seurat[['module_chromvar']] <- seurat_shared_chr[['module_chromvar']]
+
+# Save the new pando object
+saveRDS(seurat, file="Objects/data_pando.seurat.rds")
+
+DefaultAssay(seurat) <- "module_chromvar"
+FeaturePlot(seurat,
+                  features = c(intersect(paste0("MECOM"), rownames(seurat)),
+                               intersect(paste0("MECOM"), rownames(seurat))),
+                  reduction = "wnn.umap",
+                  cols = bluered_colscheme(30),
+                  order = T,
+                  ncol = 1) & NoAxes() & NoLegend()
+
+```
+
+```{r GRN visualization}
+
+# GRN visualization: visualize the inferred transcription factor network based on both co-expression and regulatory relationships between transcription factors
+# To visualize the reconstructed GRN of TFs, the pairwise Pearson correlation coefficients (PCCs) between TFs are calculated as the base TF-TF linkage score 
+
+# grn <- readRDS(file="Objects/res.GRN_glm.rds")
+coef_tfs <- grn[grn$target %in% grn$tf,c("tf","target","estimate","padj")]
+mat_coef_tfs <- sparseMatrix(i = setNames(1:length(unique(c(coef_tfs$tf,coef_tfs$target))), sort(unique(c(coef_tfs$tf,coef_tfs$target))))[coef_tfs$tf],
+                             j = setNames(1:length(unique(c(coef_tfs$tf,coef_tfs$target))), sort(unique(c(coef_tfs$tf,coef_tfs$target))))[coef_tfs$target],
+                             x = coef_tfs$estimate,
+                             dims = c(length(unique(c(coef_tfs$tf,coef_tfs$target))), length(unique(c(coef_tfs$tf,coef_tfs$target)))), dimnames = list(sort(unique(c(coef_tfs$tf,coef_tfs$target))), sort(unique(c(coef_tfs$tf,coef_tfs$target)))))
+
+mat_corr_tfs <- qlcMatrix::corSparse(t(seurat@assays$RNA@data[sort(unique(c(coef_tfs$tf,coef_tfs$target))),]))
+dimnames(mat_corr_tfs) <- list(sort(unique(c(coef_tfs$tf,coef_tfs$target))), sort(unique(c(coef_tfs$tf,coef_tfs$target))))
+corr_tfs <- as_tibble(setNames(summary(as(Matrix::Matrix(mat_corr_tfs, sparse=T), "dgCMatrix")),c("from","to","corr")))
+corr_tfs$from <- rownames(mat_corr_tfs)[corr_tfs$from]
+corr_tfs$to <- rownames(mat_corr_tfs)[corr_tfs$to]
+
+# Next, the lineage score between any TF pair with no inferred direct regulatory relationship is set to 0. 
+mat_rel_tfs <- sign(mat_corr_tfs) * sqrt(abs(mat_corr_tfs)) * ((as.matrix(mat_coef_tfs)!=0) + (as.matrix(t(mat_coef_tfs))!=0) != 0)
+
+set.seed(70)
+# A partial PCA is then applied to convert the linkage score matrix to represent each TF by a 20-dimensional vector
+pca_tfs <- irlba::prcomp_irlba(mat_rel_tfs, n = 50)$x
+
+set.seed(30)
+# This truncated PC matrix is used as the input to generate the UMAP embedding of the TFs
+umap_tfs <- uwot::umap(pca_tfs, n_neighbors = 30L, min_dist = 0.3, metric="euclidean")
+
+
+avg_expr_cl <- sapply(levels(seurat$wsnn_res.0.05), function(cl) rowMeans(seurat@assays$RNA@data[,which(seurat$wsnn_res.0.05 == cl)]))
+tf_edges_df <- setNames(left_join(coef_tfs, corr_tfs, by=c("tf"="from","target"="to")), c("from","to","coef","padj","corr"))
+tf_df <- as_tibble(data.frame(tf = rownames(mat_coef_tfs), # Take the row names of the matrix with the TF coefficients as the TFs
+                              max_proj_cl = factor(colnames(avg_expr_proj_cl)[apply(avg_expr_proj_cl[rownames(mat_coef_tfs),],1,which.max)], levels=colnames(avg_expr_proj_cl)), # Assign a projected timecourse cluster to each TF based on the maximum similarity in expression to that cluster
+                              max_cl = factor(colnames(avg_expr_cl)[apply(avg_expr_cl[rownames(mat_coef_tfs),],1,which.max)], levels=colnames(avg_expr_cl)), # Assign a wsnn_res.0.05 cluster to each TF based on the maximum similarity in expression to that cluster
+                              max_expr_proj_cl = apply(avg_expr_proj_cl[rownames(mat_coef_tfs),],1,max), # The average expression of each TF, as belonging to its projected timecourse cluster
+                              max_expr_cl = apply(avg_expr_cl[rownames(mat_coef_tfs),],1,max), # The average expression of each TF, as belonging to its wsnn_res.0.05 cluster 
+                              num_targets = sapply(split(grn,grn$tf), function(x) length(unique(x$target)))[rownames(mat_coef_tfs)], # Number of targets for each TF
+                              num_sites = sapply(split(grn,grn$tf), function(x) length(unique(x$region)))[rownames(mat_coef_tfs)], # Number of regions for each TF
+                              setNames(data.frame(t(scale(t(avg_expr_proj_cl[rownames(mat_coef_tfs),])))), paste0("expr_proj_cl_",colnames(avg_expr_proj_cl))), # The average expression for each TF in each projected timecourse cluster
+                              setNames(data.frame(t(scale(t(avg_expr_cl[rownames(mat_coef_tfs),])))), paste0("expr_cl_",colnames(avg_expr_cl))), # The average expression for each TF in each wsnn_res.0.05 cluster
+                              umap1 = umap_tfs[,1], umap2 = umap_tfs[,2])) # Assign the 2 dimensions based on the umap dimension reduction output
+tf_graph <- as_tbl_graph(tf_edges_df) %>%
+  activate(edges) %>%
+  mutate(from_node=.N()$name[from], to_node=.N()$name[to]) %>%
+  activate(nodes) %>%
+  mutate(
+    central_pr=centrality_pagerank(weights = coef),
+    central_betw=centrality_betweenness(),
+    central_eig=centrality_eigen(),
+    central_deg=centrality_degree(),
+    outdegree=centrality_degree(mode='out'),
+    indegree=centrality_degree(mode='in')
+  ) %>%
+  inner_join(tf_df, by=c('name'='tf')) %>%
+  activate(edges)
+save(tf_edges_df, tf_df, tf_graph, file="res.GRN_TF_network.rdata")
+
+cols_cl <- setNames(c("#DDB40D","#C24032","#2CA089","#566573"),levels(seurat$wsnn_res.0.05))
+cols_proj_cl <- setNames(c(c("#1F618D","#2874A6"),
+                           colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(5),
+                           colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4),
+                           colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(7), 
+                           c("#BFC9CA","#566573","#273746")),
+                         c(0,3,4,9,10,13,2,7,1,8,16,14,15,18,11,5,6,20,17,19,12)) # color orders: PSC, mesoderm, mural, endothelial, others
+
+# genes_show_1 <- tf_df$tf[tf_df$max_expr_cl>2]
+# p1 <- ggraph(tf_graph, x=umap1, y=umap2) +
+#   geom_edge_diagonal(aes(alpha=-log10(padj)), color='darkgray', width=0.1) +
+#   geom_node_point(aes(fill=max_cl, size=num_targets, alpha = max_expr_cl), shape=21, stroke=0.5) +
+#   geom_node_text(aes(label=name, filter=name%in%genes_show_1, size=50), repel=T) +
+#   scale_edge_alpha_continuous(range=c(0.05,0.5), limits=c(50,150), guide=F) +
+#   scale_radius(range = c(1,8), trans = "sqrt", guide=F) +
+#   scale_alpha(range = c(0.05,1), guide=F) +
+#   scale_fill_manual(values = cols_cl) +
+#   theme_void()
+# 
+# genes_show_2 <- tf_df$tf[tf_df$max_expr_proj_cl>2]
+# p2 <- ggraph(tf_graph, x=umap1, y=umap2) +
+#   geom_edge_diagonal(aes(alpha=-log10(padj)), color='darkgray', width=0.1) +
+#   geom_node_point(aes(fill=max_proj_cl, size=num_targets, alpha = max_expr_proj_cl), shape=21, stroke=0.5) +
+#   geom_node_text(aes(label=name, filter=name%in%genes_show_2, size=50), repel=T) +
+#   scale_edge_alpha_continuous(range=c(0.05,0.5), limits=c(50,150), guide=F) +
+#   scale_radius(range = c(1,8), trans = "sqrt", guide=F) +
+#   scale_alpha(range = c(0.05,1), guide=F) +
+#   scale_fill_manual(values = cols_proj_cl) +
+#   theme_void()
+# (p1 + labs(fill = "WSNN cluster\n(max expr)")) | (p2 + labs(fill = "Projected cluster\n(max expr)"))
+
+
+genes_show_3 <- tf_df$tf[tf_df$max_expr_proj_cl>1.5 & tf_df$num_targets>200] # Label only genes with more than 1.5 average expression and more than 200 gene targets
+
+png("Plots/pando_GRN_UMAP_cisTopic.png",height=16, width=32, unit="cm", res=500)
+(tf_graph %>% activate(edges) %>%
+  mutate(min_expr = ifelse(.N()$max_expr_proj_cl[from]>.N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[from])) %>% # Add column with min_expr which is the lowest detected average expression as assigned to projected timecourse cluster (regardless of whether it is associated with the from_node or the to_node)
+  filter(min_expr > 0.5) %>% # Filter edges based on the minimum expression value
+  activate(nodes) %>%
+  mutate(degree = centrality_degree(mode = "all")) %>%
+  filter(degree > 0) %>%
+ggraph(x=umap1, y=umap2) +
+  geom_edge_diagonal(aes(alpha=-log10(padj)), color='darkgray', width=0.5) +
+  geom_node_point(aes(fill=max_proj_cl, size=num_targets, alpha = max_expr_proj_cl, filter = max_expr_proj_cl > 0.1), shape=21, stroke=0.5) +
+  geom_node_text(aes(label=name, filter=name%in%genes_show_3, size=70), repel=T) +
+  scale_radius(range = c(2,10), trans = "sqrt") +
+  scale_alpha(range = c(0.4,1), trans = "sqrt") +
+  scale_fill_manual(values = cols_proj_cl, guide=F) +
+  theme_void()) |
+(tf_graph %>% activate(edges) %>%
+  mutate(min_expr = ifelse(.N()$max_expr_proj_cl[from]>.N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[from])) %>% # Add column with min_expr which is the lowest detected average expression as assigned to projected timecourse cluster (regardless of whether it is associated with the from_node or the to_node)
+  filter(min_expr > 0.5) %>% # Filter edges based on the minimum expression value
+  activate(nodes) %>%
+  mutate(degree = centrality_degree(mode = "all")) %>%
+  filter(degree > 0) %>%
+ggraph(x=umap1, y=umap2) +
+  geom_edge_link(aes(alpha=-log10(padj)), color='darkgray', width=0.5) +
+  geom_node_point(aes(fill=max_proj_cl, size=num_targets, alpha = max_expr_proj_cl), shape=21, stroke=0.5) +
+  geom_node_text(aes(label=name, filter=name%in%genes_show_3, size=70), repel=T #F, max.overlaps = 50
+                 ) +
+  scale_radius(range = c(2,10), trans = "sqrt") +
+  scale_alpha(range = c(0.4,1), trans = "sqrt") +
+  scale_fill_manual(values = cols_proj_cl, guide=F) +
+  theme_void())
+dev.off()
+
+
+genes_show_4 <-c("HHEX","ETV2","LYL1","KLF2","SOX17","SOX18","SOX6","SOX7","FLI1","MECOM","ZEB1","TWIST1","PITX1","ATF3","REN","SNAI2","HAND2","CXCR4","ITGAV","KDR","APLNR","TNFRSF12A","NRP2","HAPLN1","ACTC1","FLT4","FLT1","ECSCR","NR2F2","ITGA4","NTRK2","GFRA1","NCAM1","CXCL14") # Label only CROPseq target genes
+
+png("Plots/pando_GRN_UMAP_cisTopic_CROPseq_genes.png",height=16, width=32, unit="cm", res=500)
+(tf_graph %>% activate(edges) %>%
+  mutate(min_expr = ifelse(.N()$max_expr_proj_cl[from]>.N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[from])) %>% # Add column with min_expr which is the lowest detected average expression as assigned to projected timecourse cluster (regardless of whether it is associated with the from_node or the to_node)
+  filter(min_expr > 0) %>% # Filter edges based on the minimum expression value
+  activate(nodes) %>%
+  mutate(degree = centrality_degree(mode = "all")) %>%
+  filter(degree > 0) %>%
+ggraph(x=umap1, y=umap2) +
+  geom_edge_diagonal(aes(alpha=-log10(padj)), color='darkgray', width=0.5) +
+  geom_node_point(aes(fill=max_proj_cl, size=num_targets, alpha = max_expr_proj_cl, filter = max_expr_proj_cl > 0.1), shape=21, stroke=0.5) +
+  geom_node_text(aes(label=name, filter=name%in%genes_show_4, size=70), repel=T) +
+  scale_radius(range = c(2,10), trans = "sqrt") +
+  scale_alpha(range = c(0.4,1), trans = "sqrt") +
+  scale_fill_manual(values = cols_proj_cl, guide=F) +
+  theme_void()) |
+(tf_graph %>% activate(edges) %>%
+  mutate(min_expr = ifelse(.N()$max_expr_proj_cl[from]>.N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[from])) %>% # Add column with min_expr which is the lowest detected average expression as assigned to projected timecourse cluster (regardless of whether it is associated with the from_node or the to_node)
+  filter(min_expr > 0.5) %>% # Filter edges based on the minimum expression value
+  activate(nodes) %>%
+  mutate(degree = centrality_degree(mode = "all")) %>%
+  filter(degree > 0) %>%
+ggraph(x=umap1, y=umap2) +
+  geom_edge_diagonal(aes(alpha=-log10(padj)), color='darkgray', width=0.5) +
+  geom_node_point(aes(fill=max_proj_cl, size=num_targets, alpha = max_expr_proj_cl), shape=21, stroke=0.5) +
+  geom_node_text(aes(label=name, filter=name%in%genes_show_4, size=70), repel=T #F, max.overlaps = 50
+                 ) +
+  scale_radius(range = c(2,10), trans = "sqrt") +
+  scale_alpha(range = c(0.4,1), trans = "sqrt") +
+  scale_fill_manual(values = cols_proj_cl, guide=F) +
+  theme_void())
+dev.off()
+
+png("Plots/pando_GRN_UMAP_cisTopic_noLabel.png",height=16, width=32, unit="cm", res=500)
+(tf_graph %>% activate(edges) %>%
+  mutate(min_expr = ifelse(.N()$max_expr_proj_cl[from]>.N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[from])) %>% # Add column with min_expr which is the lowest detected average expression as assigned to projected timecourse cluster (regardless of whether it is associated with the from_node or the to_node)
+  filter(min_expr > 0.5) %>% # Filter edges based on the minimum expression value
+  activate(nodes) %>%
+  mutate(degree = centrality_degree(mode = "all")) %>%
+  filter(degree > 0) %>%
+ggraph(x=umap1, y=umap2) +
+  geom_edge_diagonal(aes(alpha=-log10(padj)), color='darkgray', width=0.5) +
+  geom_node_point(aes(fill=max_proj_cl, size=num_targets, alpha = max_expr_proj_cl, filter = max_expr_proj_cl > 0.1), shape=21, stroke=0.5) +
+  #geom_node_text(aes(label=name, filter=name%in%genes_show_3, size=70), repel=T) +
+  scale_radius(range = c(2,10), trans = "sqrt") +
+  scale_alpha(range = c(0.4,1), trans = "sqrt") +
+  scale_fill_manual(values = cols_proj_cl, guide=F) +
+  theme_void()) |
+(tf_graph %>% activate(edges) %>%
+  mutate(min_expr = ifelse(.N()$max_expr_proj_cl[from]>.N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[from])) %>% # Add column with min_expr which is the lowest detected average expression as assigned to projected timecourse cluster (regardless of whether it is associated with the from_node or the to_node)
+  filter(min_expr > 0.5) %>% # Filter edges based on the minimum expression value
+  activate(nodes) %>%
+  mutate(degree = centrality_degree(mode = "all")) %>%
+  filter(degree > 0) %>%
+ggraph(x=umap1, y=umap2) +
+  geom_edge_link(aes(alpha=-log10(padj)), color='darkgray', width=0.5) +
+  geom_node_point(aes(fill=max_proj_cl, size=num_targets, alpha = max_expr_proj_cl), shape=21, stroke=0.5) +
+  #geom_node_text(aes(label=name, filter=name%in%genes_show_3, size=70), repel=T #F, max.overlaps = 50
+  #               ) +
+  scale_radius(range = c(2,10), trans = "sqrt") +
+  scale_alpha(range = c(0.4,1), trans = "sqrt") +
+  scale_fill_manual(values = cols_proj_cl, guide=F) +
+  theme_void())
+dev.off()
+
+pdf("Plots/pando_GRN_UMAP_cisTopic.pdf",height=6, width=12)
+(tf_graph %>% activate(edges) %>%
+  mutate(min_expr = ifelse(.N()$max_expr_proj_cl[from]>.N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[from])) %>% # Add column with min_expr which is the lowest detected average expression as assigned to projected timecourse cluster (regardless of whether it is associated with the from_node or the to_node)
+  filter(min_expr > 0.5) %>% # Filter edges based on the minimum expression value
+  activate(nodes) %>%
+  mutate(degree = centrality_degree(mode = "all")) %>%
+  filter(degree > 0) %>%
+ggraph(x=umap1, y=umap2) +
+  geom_edge_diagonal(aes(alpha=-log10(padj)), color='darkgray', width=0.5) +
+  geom_node_point(aes(fill=max_proj_cl, size=num_targets, alpha = max_expr_proj_cl, filter = max_expr_proj_cl > 0.1), shape=21, stroke=0.5) +
+  geom_node_text(aes(label=name, filter=name%in%genes_show_3, size=30), repel=F, max.overlaps = 50) +
+  scale_radius(range = c(2,10), trans = "sqrt") +
+  scale_alpha(range = c(0.4,1), trans = "sqrt") +
+  scale_fill_manual(values = cols_proj_cl, guide=F) +
+  theme_void()) |
+(tf_graph %>% activate(edges) %>%
+  mutate(min_expr = ifelse(.N()$max_expr_proj_cl[from]>.N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[to], .N()$max_expr_proj_cl[from])) %>% # Add column with min_expr which is the lowest detected average expression as assigned to projected timecourse cluster (regardless of whether it is associated with the from_node or the to_node)
+  filter(min_expr > 0.5) %>% # Filter edges based on the minimum expression value
+  activate(nodes) %>%
+  mutate(degree = centrality_degree(mode = "all")) %>%
+  filter(degree > 0) %>%
+ggraph(x=umap1, y=umap2) +
+  geom_edge_link(aes(alpha=-log10(padj)), color='darkgray', width=0.5) +
+  geom_node_point(aes(fill=max_proj_cl, size=num_targets, alpha = max_expr_proj_cl), shape=21, stroke=0.5) +
+  geom_node_text(aes(label=name, filter=name%in%genes_show_3, size=30), repel=F, max.overlaps = 50) +
+  scale_radius(range = c(2,10), trans = "sqrt") +
+  scale_alpha(range = c(0.4,1), trans = "sqrt") +
+  scale_fill_manual(values = cols_proj_cl, guide=F) +
+  theme_void())
+dev.off()
+
+```
+
+
+```{r scan for MECOM KO DE TFs only}
+
+# Load DE TFs from MECOM KO clusters 2 and 8 (RNA_snn_css_res.0.4)
+deg_cl2 <- read.csv("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/DE_wilcoxauc_cl2.csv", header = T)
+deg_cl8 <- read.csv("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/DE_wilcoxauc_cl8.csv", header = T)
+# Load human TFs
+human_tfs <- read_tsv("/home/marinani/Scripts/Databases/AnimalTFDB/AnimalTFDB_v3/Homo_sapiens_TF.tsv")
+
+# Filter DEGs
+deg_cl2_pos_tf <- deg_cl2 %>% filter(outcome == "Up-regulated" & feature %in% human_tfs$Symbol)
+deg_cl2_pos <- deg_cl2 %>% filter(outcome == "Up-regulated")
+deg_cl2_neg_tf <- deg_cl2 %>% filter(outcome == "Down-regulated" & feature %in% human_tfs$Symbol)
+deg_cl2_neg <- deg_cl2 %>% filter(outcome == "Down-regulated")
+deg_cl2_tf <- deg_cl2 %>% filter(outcome != "Unchanged" & feature %in% human_tfs$Symbol)
+deg_cl2_all <- deg_cl2 %>% filter(outcome != "Unchanged")
+
+deg_cl8_pos_tf <- deg_cl8 %>% filter(outcome == "Up-regulated" & feature %in% human_tfs$Symbol)
+deg_cl8_pos <- deg_cl8 %>% filter(outcome == "Up-regulated")
+deg_cl8_neg_tf <- deg_cl8 %>% filter(outcome == "Down-regulated" & feature %in% human_tfs$Symbol)
+deg_cl8_neg <- deg_cl8 %>% filter(outcome == "Down-regulated")
+deg_cl8_tf <- deg_cl8 %>% filter(outcome != "Unchanged" & feature %in% human_tfs$Symbol)
+deg_cl8_all <- deg_cl8 %>% filter(outcome != "Unchanged")
+
+```
+
+```{r MECOM-centered GRN}
+
+# Find which genes from the DE analysis in cluster 2 and 8 of the MECOM KO data have the regulation direction based on the multiome data
+# i.e. if a gene is up-regulated upon MECOM KO, then according to the multiome MECOM should be repressing this gene
+mecom_graph <- seurat@grn@networks$glm_network@graphs$tf_graphs
+mecom_graph <- mecom_graph$MECOM
+mecom_graph_df <-  mecom_graph %>% as_data_frame() %>% filter(from == "MECOM")
+mecom_graph_df_neg <- mecom_graph_df %>% filter(dir == "-1")
+mecom_graph_df_pos <- mecom_graph_df %>% filter(dir == "1")
+cl2_neg_reg_up <- intersect(deg_cl2_pos$feature, mecom_graph_df_neg$end_node) 
+cl2_pos_reg_down <- intersect(deg_cl2_neg$feature, mecom_graph_df_pos$end_node)
+cl8_neg_reg_up <- intersect(deg_cl8_pos$feature, mecom_graph_df_neg$end_node)
+cl8_pos_reg_down <- intersect(deg_cl8_neg$feature, mecom_graph_df_pos$end_node)
+mecom_graph_df %>% filter(from == "MECOM", to %in% c(cl2_neg_reg_up, cl2_pos_reg_down, cl8_neg_reg_up, cl8_pos_reg_down)) 
+
+# Save the graph as a data frame
+write_csv(mecom_graph_df, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/pando_MECOM_graph.csv")
+
+# Add a MECOM subgraph with the DEGs from cluster 2 which have the same regulation direction as in the multiome
+seurat <- get_network_graph(
+    seurat, 
+    graph_name = 'MECOM_graph_cluster2', 
+    umap_method = 'none')
+mecom_graph_cluster2 <- seurat@grn@networks$glm_network@graphs$tf_graphs
+mecom_graph_cluster2 <- mecom_graph_cluster2$MECOM
+seurat <- get_tf_network(seurat, tf='MECOM', graph='MECOM_graph_cluster2', features = c(cl2_neg_reg_up, cl2_pos_reg_down))
+
+pdf("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/pando_MECOM_graph_cluster2_all.pdf", height = 25, width = 25)
+  plot_tf_network(seurat, tf='MECOM',graph = 'MECOM_graph_cluster2',edge_color = c("#B2182B", "#2166AC"),label_nodes = "all") # blue - activating, red - repressing
+dev.off()
+
+pdf("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/pando_MECOM_graph_cluster2_TFs.pdf", height = 5, width = 5)
+  plot_tf_network(seurat, tf='MECOM',graph = 'MECOM_graph_cluster2',edge_color = c("#B2182B", "#2166AC"), label_nodes = "tfs") # blue - activating, red - repressing
+dev.off()
+
+pdf("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/pando_MECOM_graph_cluster2.pdf", height = 2.5, width = 4)
+ggraph(mecom_graph_cluster2, layout='tree', circular=T) +
+  geom_edge_diagonal(aes(color=sign(estimate)), alpha=0.5, width=0.2) +
+  geom_node_point(aes(fill=pathway), size=1, shape=21, stroke=0.2, fill='grey') +
+  geom_node_label(aes(label=name, filter=name%in%c("MEIS1","EGR1","FOS","TAGLN2","PRRX1","COL3A1","HMGB2","CRHBP","COL6A1","COL6A2","COL15A1","TAGLN","ETS1","THY1","MYL9","FCGRT","SNAI2","SULF1","IGFBP7","FLI1","TCF4","ZEB1","GATA4","HIVEP2","RUNX1","FOXO1")), size=4/ggplot2::.pt, label.padding=unit(0.05, 'cm'), label.size=0.05) +
+  scale_edge_color_gradientn(colors=c("#B2182B", "#2166AC")) +
+  scale_x_continuous(expand=c(0.1, 0)) +
+  scale_y_continuous(expand=c(0.1, 0), trans = 'reverse') +
+  theme_void() + 
+  coord_flip()
+dev.off()
+
+
+# Add a MECOM subgraph with the DEGs from cluster 8 which have the same regulation direction as in the multiome
+seurat <- get_network_graph(
+    seurat, 
+    graph_name = 'MECOM_graph_cluster8', 
+    umap_method = 'none')
+mecom_graph_cluster8 <- seurat@grn@networks$glm_network@graphs$tf_graphs
+mecom_graph_cluster8 <- mecom_graph_cluster8$MECOM
+seurat <- get_tf_network(seurat, tf='MECOM', graph='MECOM_graph_cluster8', features = c(cl8_neg_reg_up, cl8_pos_reg_down))
+
+pdf("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/pando_MECOM_graph_cluster8_all.pdf", height = 25, width = 25)
+  plot_tf_network(seurat, tf='MECOM',graph = 'MECOM_graph_cluster8',edge_color = c("#B2182B", "#2166AC"),label_nodes = "all") # blue - activating, red - repressing
+dev.off()
+
+pdf("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/pando_MECOM_graph_cluster8_TFs.pdf", height = 5, width = 5)
+  plot_tf_network(seurat, tf='MECOM',graph = 'MECOM_graph_cluster8',edge_color = c("#B2182B", "#2166AC"),label_nodes = "tfs") # blue - activating, red - repressing
+dev.off()
+
+pdf("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/pando_MECOM_graph_cluster8.pdf", height = 2.5, width = 4)
+ggraph(mecom_graph_cluster8, layout='tree', circular=T) +
+  geom_edge_diagonal(aes(color=sign(estimate)), alpha=0.5, width=0.2) +
+  geom_node_point(aes(fill=pathway), size=1, shape=21, stroke=0.2, fill='grey') +
+  geom_node_label(aes(label=name, filter=name%in%c("MECOM","TGFBR2","TFPI2","APLNR","ROBO4","FOS","PLVAP","GJA4","SLC2A1","JUN","GJA5","CXCR4","TAGLN2","TAGLN","CDH5","PECAM1","CLDN5","HMGB2","TWIST1","SALL1","MAF","PGRMC1","IQSEC1","CRIP2","ROBO4","ITGA2","SKAP2","SOX7","ITGA1","PITX1","FOXP2")), size=4/ggplot2::.pt, label.padding=unit(0.05, 'cm'), label.size=0.05) +
+  scale_edge_color_gradientn(colors=c("#B2182B", "#2166AC")) +
+  scale_x_continuous(expand=c(0.1, 0)) +
+  scale_y_continuous(expand=c(0.1, 0), trans = 'reverse') +
+  theme_void() + 
+  coord_flip()
+dev.off()
+
+
+
+# # Plot a subgraph of the GRN centerеd around MECOM
+# pdf("Plots/pando_TF_network_MECOM_cisTopic.pdf", height = 12, width = 12)
+# plot_tf_network(seurat, tf='MECOM')
+# dev.off()
+
+# pdf("Plots/pando_TF_network_subgraph_MECOM_KO_DE_cisTopic.pdf", height = 2.5, width = 4)
+# ggraph(mecom_graph, layout='tree', circular=T) +
+#   geom_edge_diagonal(aes(color=sign(estimate)), alpha=0.5, width=0.2) +
+#   geom_node_point(aes(fill=pathway), size=1, shape=21, stroke=0.2, fill='grey') +
+#   geom_node_label(aes(label=name, filter=name%in%c("MECOM","TAGLN2","LUM","DLK1","CXCL14","CXCL12","MYL9","COL3A1","TAGLN","HSPG2","COL1A2","COL1A1","ID3", "CCL2","ID1","COL18A1","MYL12A","TWIST1","ADAMTS9","HOPX","HMGB2","MIS18BP1","CD44","KCTD12","ACTA2","IGFBP3")), size=4/ggplot2::.pt, label.padding=unit(0.05, 'cm'), label.size=0.05) +
+#   scale_edge_color_gradientn(colors=c('#7E3A8C', '#3D954E')) +
+#   #scale_fill_manual(values=pathway_colors, na.value = 'white') +
+#   scale_x_continuous(expand=c(0.1, 0)) +
+#   scale_y_continuous(expand=c(0.1, 0), trans = 'reverse') +
+#   #article_text() + 
+#   theme_void() + 
+#   #no_legend() +
+#   coord_flip()
+# dev.off()
+
+```
+
+```{r save final seurat pando object}
+
+saveRDS(seurat, file="/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/data_pando.seurat.rds")
+
+```
+

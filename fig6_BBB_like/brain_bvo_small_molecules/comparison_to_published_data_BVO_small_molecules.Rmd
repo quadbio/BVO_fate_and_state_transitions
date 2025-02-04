@@ -1,0 +1,707 @@
+---
+title: "Brain BVOs comparison to primary"
+author: "Marina Nikolova"
+date: "11/05/2023"
+output: html_document
+---
+
+# Basic setup
+
+## Load packages
+```{r load packages}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(gplots)
+library(tibble)
+library(tidyr)
+library(rcartocolor)
+library(harmony)
+
+source("~/feature_plots.r")
+
+# Generate two useful color palettes
+
+col_cl <- setNames(c(c("#1F618D","#2874A6"),                                # PSC colors
+                     colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(5), # mesoderm colors
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4), # mural colors
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(7), # endothelial colors
+                     c("#BFC9CA","#566573","#273746")),                     # other cluster colors
+                   c(0,3,                # PSC clusters
+                     4,9,10,13,2,        # mesoderm clusters
+                     7,1,8,16,           # mural cell clusters
+                     14,15,18,11,5,6,20, # endothelial cell clusters
+                     17,19,12))          # other clusters
+
+colors2 <- c(c("#1F618D","#2874A6"),                                # PSC colors
+                        colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(5), # mesoderm colors
+                        colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4), # mural colors
+                        colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(7), # endothelial colors
+                        c("#BFC9CA","#566573","#273746"))
+
+colors_primary <- colorRampPalette(c("#855C75", "#D9AF6B", "#AF6458", "#736F4C", "#526A83", "#625377", "#68855C", "#9C9C5E", "#A06177", "#8C785D", "#467378", "#7C7C7C"))
+colors_primary2 <- colorRampPalette(c("#88CCEE", "#CC6677", "#DDCC77", "#117733", "#332288", "#AA4499", "#44AA99", "#999933", "#882255", "#661100", "#6699CC", "#888888"))
+
+```
+
+## Load data
+Load brain-like BVO data.
+```{r load brain BVO data}
+
+seurat <- readRDS("~/seurat.processed.rds")
+seurat_endo <- readRDS("~/seurat.endothelial.rds")
+seurat_mural <- readRDS("~/seurat.mural.rds")
+
+```
+
+
+Load the Cao et al 2020 dataset.
+```{r load Cao data}
+
+# Use the endothelial cell data with brain pericytes excluded
+seurat_endo_ref <- readRDS("~/endothelial_brain_pericyte_excl.seurat.RDS")
+seurat_endo_orgs_ref <- readRDS(file="~/endothelial_organs_brain_pericyte_excl.seurat.RDS")
+dat_endo_ct_ref <- readRDS("~/dat.manual_annotated_ct_brain_pericytes_excl.datalist.rds")
+
+```
+
+Load the BBB dataset.
+Reference dataset BBB atlas - human primary brain cells from (2022) Garica et al., Single-cell dissection of the human brain vasculature, Nature
+```{r load the ref BBB atlas}
+
+# Load the counts 
+ref_counts_BBB <- readRDS("~/brain.BBB.human.counts.rds")
+
+# Load the metadata for these cells only, which has also more details
+ref_meta_BBB_vasc <- read.table("~/brain.BBB.human.vascular.final.Jan2022.metadata.txt", header = T,sep = '\t')
+
+```
+
+Load Tabula Sapiens data
+```{r load TS data}
+
+TS_seurat <- readRDS("~/object.TS_integrated.rds")
+TS_endo <- readRDS("~/object.TS_endo_integrated.rds")
+TS_stroma <- readRDS("~/object.TS_stroma_integrated.rds")
+
+```
+
+Load the Crouch data
+```{r load Crouch data}
+
+# Data from Elizabeth E. Crouch et al (2022) Cell
+crouch_seurat <- readRDS("~/crouch_data.RDS")
+
+```
+
+Clean up the BBB dataset.
+```{r clean up BBB count matrix}
+
+# The count matrix and metadata do not match - 84'350 cells (columns) in the original count matrix, but only 4'992 cells in the metadata
+# What is more, only 4'980 of those match (intersect)
+# I do not know the reason for this but safest is to keep only the matching cell barcodes (matrix columns) to metadata rownames
+
+# Create a vector of matrix colnames
+a <- ref_counts_BBB@Dimnames[[2]]
+head(a)
+length(a)
+
+# Create a vector of metadata rownames 
+b <- rownames(ref_meta_BBB_vasc)
+head(b)
+length(b)
+
+# Keep only the matching characters
+c <- intersect(a, b)
+head(c)
+length(c)
+
+# Generate a new matrix which contains only the cells (columns) for which we have the metadata
+ref_counts_BBB_vasc <- ref_counts_BBB[, intersect(c, colnames(ref_counts_BBB))]
+
+# Generate a new metadata which contains only the cells (rows) for which we have the metadata
+ref_meta_BBB_vasc <- ref_meta_BBB_vasc[c, ]
+
+```
+
+Clean up Tabula Sapiens data
+```{r clean TS data and save}
+
+# Some organs had less than 50 endothelial or stromal cells and will therefore be excluded from usage as reference as this information is not be sufficient for reliable analysis 
+table(TS_endo$organ_tissue) # Remove Lymph_Node - 10 and pool Small_Intestine - 32 and Large_Intestine - 74 into one organ -> Intestine
+TS_endo$organ_tissue <- gsub("Small_Intestine", "Intestine", TS_endo$organ_tissue)
+TS_endo$organ_tissue <- gsub("Large_Intestine", "Intestine", TS_endo$organ_tissue)
+TS_endo <- subset(TS_endo,idents = "Lymph_Node", invert = T)
+
+
+Idents(TS_stroma) <- "organ_tissue"
+table(TS_stroma$organ_tissue) # Remove Skin - 9 and pool Small_Intestine - 107 and Large_Intestine - 1268 into one organ -> Intestine
+TS_stroma$organ_tissue <- gsub("Small_Intestine", "Intestine", TS_stroma$organ_tissue)
+TS_stroma$organ_tissue <- gsub("Large_Intestine", "Intestine", TS_stroma$organ_tissue)
+TS_stroma <- subset(TS_stroma,idents = "Skin", invert = T)
+
+```
+
+```{r create reference BBB Seurat object}
+
+# Create reference Seurat object
+ref_seurat_BBB_vasc <- CreateSeuratObject(ref_counts_BBB_vasc, project = "ref_BBB")
+
+# Add metadata to the object
+ref_seurat_BBB_vasc@meta.data <- ref_meta_BBB_vasc
+
+# Check the object
+View(ref_seurat_BBB_vasc@meta.data) # Only 4'968 cells are annotated as Vascular, but there are 4'992 vascular cells mentioned in the paper and present in the detailed metadata which we add later
+
+# Preprocess the object
+all.genes.ref <- rownames(ref_seurat_BBB_vasc)
+ref_seurat_BBB_vasc <- NormalizeData(ref_seurat_BBB_vasc) %>%
+          FindVariableFeatures() %>%
+          ScaleData(features = all.genes.ref) %>%
+          RunPCA(npcs = 50) %>%
+          RunHarmony("SampleID", max.iter.harmony = 50, dims.use = 1:50) %>% 
+          FindNeighbors(reduction = "harmony", dims = 1:50) %>%
+          FindClusters(resolution = 0.5) %>%
+          RunUMAP(reduction = "harmony", dims = 1:50)
+
+## Subset EC BBB ref only
+Idents(ref_seurat_BBB_vasc) <- "celltype"
+ref_seurat_BBB_EC <- subset(ref_seurat_BBB_vasc, idents = "Endo")
+ref_seurat_BBB_EC <- FindVariableFeatures(ref_seurat_BBB_EC, nfeatures = 3000) %>%
+          ScaleData(features = all.genes.ref) %>%
+          RunPCA(npcs = 50) %>%
+          RunHarmony("SampleID", max.iter.harmony = 50, dims.use = 1:50) %>% 
+          FindNeighbors(reduction = "harmony", dims = 1:50) %>%
+          FindClusters(resolution = 0.5) %>%
+          FindClusters(resolution = 10) %>%
+          RunUMAP(reduction = "harmony", dims = 1:50)
+
+## Subset stromal BBB ref only
+Idents(ref_seurat_BBB_vasc) <- "celltype"
+ref_seurat_BBB_stroma <- subset(ref_seurat_BBB_vasc, idents = c("Fib","Mural"))
+ref_seurat_BBB_stroma <- FindVariableFeatures(ref_seurat_BBB_stroma, nfeatures = 3000) %>%
+          ScaleData(features = all.genes.ref) %>%
+          RunPCA(npcs = 50) %>%
+          RunHarmony("SampleID", max.iter.harmony = 50, dims.use = 1:50) %>% 
+          FindNeighbors(reduction = "harmony", dims = 1:50) %>%
+          FindClusters(resolution = 0.5) %>%
+          RunUMAP(reduction = "harmony", dims = 1:50)
+
+anchors <- FindTransferAnchors(reference = seurat_endo_ref, query = ref_seurat_BBB_EC, dims = 1:30, npcs = 30, reduction = "pcaproject")
+predictions <- TransferData(anchorset = anchors, refdata = seurat_endo_ref$Organ, dims = 1:30, weight.reduction = "pca", query = ref_seurat_BBB_EC)
+ref_seurat_BBB_EC$celltype_transfer <- predictions$predicted.id
+
+```
+
+```{r save reference BBB atlas}
+
+# Save the reference BBB atlas with subset vascular cells only with metadata
+saveRDS(ref_seurat_BBB_vasc, "~/brain.BBB.vasc.human.seurat.rds")
+saveRDS(ref_seurat_BBB_stroma, "~/brain.BBB_stroma.vasc.human.seurat.rds")
+saveRDS(ref_seurat_BBB_EC, "~/brain.BBB_EC.vasc.human.seurat.rds")
+
+```
+
+
+# Comparison to reference datasets
+
+## Comparison to Cao fetal organ ECs
+Next, we are going to find the markers for each organ from the reference data set.
+```{r find reference markers}
+
+# Find marker genes for the reference and for the query data sets 
+DE_wilcoxauc <- wilcoxauc(seurat_endo_ref, group_by = "Organ") %>%
+  mutate(DE = abs(logFC)>log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55, feature, NA))
+
+  DE_wilcoxauc$padj[DE_wilcoxauc$padj == 0.000000e+00] <- min(DE_wilcoxauc$padj[which(DE_wilcoxauc$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc <- DE_wilcoxauc %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55 ~ "Up-regulated",
+                           logFC < -log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc) 
+
+top100_ref_cl_markers <- DE_wilcoxauc %>% group_by(group) %>% slice_max(n = 100, order_by = logFC)
+top50_ref_cl_markers <- DE_wilcoxauc %>% group_by(group) %>% slice_max(n = 50, order_by = logFC)
+
+write.csv(DE_wilcoxauc, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Plots/Cao_ref_organ_EC_markers.csv")
+
+```
+
+```{r heatmap marker genes}
+
+# Heatmap top primary endothelial markers per organ in PRIMARY TISSUE
+# avg_cond_org <- sapply(levels(seurat_endo_ref$Organ), function(x) rowMeans(seurat_endo_ref@assays$RNA@data[,which(seurat_endo_ref$Organ==x)]))
+avg_cond_org <- AverageExpression(seurat_endo_ref, return.seurat = FALSE, group.by = "Organ", add.ident = NULL, slot = "data", verbose = TRUE, features = top50_ref_cl_markers$feature, assays = "RNA")
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+mat_norm <- apply(avg_cond_org$RNA, 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- top50_ref_cl_markers$feature
+mat_norm <- mat_norm[,col.order]
+
+pdf("Plots/Seurat_objects_integrated/EC_heatmap_scaled_top50_primary_endo_markers.pdf", width = 10, height = 40)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  greyscale_colscheme(30), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# Now let's plot it also without the genes which are missing in the HTO data
+top50_ref_cl_markers_filtered <- top50_ref_cl_markers %>% filter(!feature %in% c("H19", "PPAP2B", "PPAP2A", "LINC00478", "SDPR", "LPHN3", "CTD-2547E10.2", "CTD-3179P9.1", "C10orf11", "RP11-89K21.1", "PTRF", "BAI3", "CTD-3006G17.2", "AC011288.2", "DLEU1", "MAGI1-IT1", "RP11-1L12.3", "LRRC16A"))
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+col.order <- top50_ref_cl_markers_filtered$feature
+mat_norm <- mat_norm[,col.order]
+
+pdf("Plots/Seurat_objects_integrated/EC_heatmap_scaled_top50_primary_endo_markers_filtered.pdf", width = 10, height = 40)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  greyscale_colscheme(30), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+
+
+# Heatmap top primary endothelial markers per organ in HTOs
+avg_cond_hto <- AverageExpression(seurat_endo, return.seurat = FALSE, group.by = "HTO_classification", add.ident = NULL, slot = "data", verbose = TRUE, features = top50_ref_cl_markers$feature, assays = "RNA")
+# Warning: The following 18 features were not found in the RNA assay: H19, PPAP2B, PPAP2A, LINC00478, SDPR, LPHN3, CTD-2547E10.2, CTD-3179P9.1, C10orf11, RP11-89K21.1, PTRF, BAI3, CTD-3006G17.2, AC011288.2, DLEU1, MAGI1-IT1, RP11-1L12.3, LRRC16A
+# We remove these features from the matrix so they don't cause inconsistency 
+top50_ref_cl_markers_filtered <- top50_ref_cl_markers %>% filter(!feature %in% c("H19", "PPAP2B", "PPAP2A", "LINC00478", "SDPR", "LPHN3", "CTD-2547E10.2", "CTD-3179P9.1", "C10orf11", "RP11-89K21.1", "PTRF", "BAI3", "CTD-3006G17.2", "AC011288.2", "DLEU1", "MAGI1-IT1", "RP11-1L12.3", "LRRC16A"))
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+mat_norm_hto <- apply(avg_cond_hto$RNA, 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order_hto <- top50_ref_cl_markers_filtered$feature
+mat_norm_hto <- mat_norm_hto[,col.order_hto]
+
+pdf("Plots/Seurat_objects_integrated/EC_heatmap_scaled_top50_primary_endo_markers_HTOs.pdf", width = 10, height = 40)
+heatmap.2(t(mat_norm_hto), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  greyscale_colscheme(30), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+```{r DEGs between brain vasculature and others in primary data}
+
+human_TF <- read.table("/home/marinani/Scripts/Databases/AnimalTFDB/AnimalTFDB_v3/Homo_sapiens_TF.tsv", sep = '\t', header = TRUE, fill = TRUE)
+
+seurat_endo_ref$Organ_2 <- seurat_endo_ref$Organ
+seurat_endo_ref$Organ_2 <- gsub("Cerebellum", "Brain",seurat_endo_ref$Organ_2)
+seurat_endo_ref$Organ_2 <- gsub("Cerebrum", "Brain",seurat_endo_ref$Organ_2)
+Idents(seurat_endo_ref) <- "Organ_2"
+  
+# Run wilcoxon test
+DE_wilcoxauc <- wilcoxauc(seurat_endo_ref, group_by = "Organ_2") %>%
+  filter(group == "Brain") %>%
+  mutate(DE = abs(logFC)>log(1.2) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.2) & padj < 0.01, feature, NA))
+
+  DE_wilcoxauc$padj[DE_wilcoxauc$padj == 0.000000e+00] <- min(DE_wilcoxauc$padj[which(DE_wilcoxauc$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc <- DE_wilcoxauc %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.2) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.2) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc$feature,blacklist)
+DE_wilcoxauc <- DE_wilcoxauc %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc)
+
+de_genes <- DE_wilcoxauc %>% filter(outcome != "Unchanged")
+
+# plot
+ggplot(DE_wilcoxauc, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_label_repel(data = de_genes, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 40) +
+  geom_vline(xintercept=c(-log(1.2), log(1.2), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# to generate a DE TFs table:
+DE_wilcoxauc_filtered <- as.data.frame(DE_wilcoxauc) %>% 
+      filter(feature %in% human_TF$Symbol)  %>% 
+      arrange(group,desc(logFC))
+DE_wilcoxauc_filtered 
+
+# add a column for no, up or down regulation
+DE_wilcoxauc_filtered$diffexpressed <- "Unchanged"
+# define up regulated as lo2FC > 0.5, pvalue < 0.05
+DE_wilcoxauc_filtered$diffexpressed[DE_wilcoxauc_filtered$logFC > 0.5 & DE_wilcoxauc_filtered$padj < 0.05] <- "Up"
+# define down regulated as lo2FC < -0.5, pvalue < 0.05
+DE_wilcoxauc_filtered$diffexpressed[DE_wilcoxauc_filtered$logFC < -0.5 & DE_wilcoxauc_filtered$padj < 0.05] <- "Down"
+
+# add label to DEGs
+DE_wilcoxauc_filtered$delabel <- NA
+DE_wilcoxauc_filtered$delabel[DE_wilcoxauc_filtered$diffexpressed != "Unchanged"] <- DE_wilcoxauc_filtered$feature[DE_wilcoxauc_filtered$diffexpressed != "Unchanged"]
+
+write.csv(DE_wilcoxauc_filtered, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Plots/Seurat_objects_integrated/Cao_atlas_DE_wilcoxauc_TFs_only_BRAIN.csv")
+
+de_genes_filtered <- DE_wilcoxauc_filtered %>% filter(outcome != "Unchanged")
+
+pdf("Plots/Seurat_objects_integrated/volcano_DE_wilcoaux_TFs_in_brain.pdf")
+ggplot(DE_wilcoxauc_filtered, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_label_repel(data = de_genes_filtered, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 20) +
+  geom_vline(xintercept=c(-log(1.2), log(1.2), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/Seurat_objects_integrated/volcano_DE_wilcoaux_TFs_in_brain_with_pct_diff.pdf")
+ggplot(DE_wilcoxauc_filtered, aes(x = logFC, y = pct_in-pct_out,label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_label_repel(data = de_genes_filtered, mapping = aes(logFC, pct_in-pct_out, label = feature), size = 3, max.overlaps = 20) +
+  #geom_vline(xintercept=c(-log(1.2), log(1.2), 0),  linetype="dotted") +
+  #geom_hline(yintercept=-log10(1), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("pct.1-pct.2"))
+dev.off()
+
+```   
+
+
+## Comparison to TS ECs
+Next, we are going to find the markers for each organ from the reference data set.
+```{r find reference markers}
+
+# Find marker genes for the reference and for the query data sets 
+DE_wilcoxauc_TS_endo <- wilcoxauc(TS_endo, group_by = "organ_tissue") %>%
+  mutate(DE = abs(logFC)>log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55, feature, NA))
+
+  DE_wilcoxauc_TS_endo$padj[DE_wilcoxauc_TS_endo$padj == 0.000000e+00] <- min(DE_wilcoxauc_TS_endo$padj[which(DE_wilcoxauc_TS_endo$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_TS_endo <- DE_wilcoxauc_TS_endo %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55 ~ "Up-regulated",
+                           logFC < -log(1.2) & padj < 0.05 & pct_in - pct_out > 10 & auc > 0.55 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_TS_endo) 
+
+top100_TS_endo_markers <- DE_wilcoxauc_TS_endo %>% group_by(group) %>% slice_max(n = 100, order_by = logFC)
+top50_TS_endo_markers <- DE_wilcoxauc_TS_endo %>% group_by(group) %>% slice_max(n = 50, order_by = logFC)
+
+write.csv(DE_wilcoxauc_TS_endo, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Brain_BVOs/Plots/TS_endo_markers.csv")
+
+```
+
+## Add module score based on annotated reference primary single-cell RNA-seq data
+
+## Create a Seurat object of the BB reference data which includes only the vascular cells and preprocess it
+
+```{r merge BBB with TS data}
+
+ref_seurat_BBB_EC$organ_tissue <- "Brain"
+ref_seurat_BBB_EC$annotation <- "endothelial cell"
+
+ref_seurat_BBB_stroma$organ_tissue <- "Brain"
+ref_seurat_BBB_stroma$annotation <- ref_seurat_BBB_stroma$cellsubtype
+ref_seurat_BBB_stroma$annotation <- gsub("aSMC","smooth muscle cell",ref_seurat_BBB_stroma$annotation)
+ref_seurat_BBB_stroma$annotation <- gsub("vSMC","smooth muscle cell",ref_seurat_BBB_stroma$annotation)
+ref_seurat_BBB_stroma$annotation <- gsub("Fib1","fibroblast",ref_seurat_BBB_stroma$annotation)
+ref_seurat_BBB_stroma$annotation <- gsub("Fib2","fibroblast",ref_seurat_BBB_stroma$annotation)
+ref_seurat_BBB_stroma$annotation <- gsub("Fib3","fibroblast",ref_seurat_BBB_stroma$annotation)
+ref_seurat_BBB_stroma$annotation <- gsub("Per1","pericyte",ref_seurat_BBB_stroma$annotation)
+ref_seurat_BBB_stroma$annotation <- gsub("Per2","pericyte",ref_seurat_BBB_stroma$annotation)
+
+TS_BBB_ec <- merge(ref_seurat_BBB_EC, TS_endo)
+TS_BBB_stroma <- merge(ref_seurat_BBB_stroma, TS_stroma)
+
+TS_BBB_ec <- NormalizeData(TS_BBB_ec) %>% CellCycleScoring(g2m.features=cc.genes.updated.2019$g2m.genes, s.features=cc.genes.updated.2019$s.genes) %>% FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(TS_BBB_ec) <- setdiff(VariableFeatures(TS_BBB_ec), c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(TS_BBB_ec), value=T), read.table("~/Databases/Gene_lists/RPgenes_bak.txt")[,1]))
+TS_BBB_stroma <- NormalizeData(TS_BBB_stroma) %>% CellCycleScoring(g2m.features=cc.genes.updated.2019$g2m.genes, s.features=cc.genes.updated.2019$s.genes) %>% FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(TS_BBB_stroma) <- setdiff(VariableFeatures(TS_BBB_stroma), c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(TS_BBB_stroma), value=T), read.table("~/Databases/Gene_lists/RPgenes_bak.txt")[,1]))
+
+TS_BBB_ec <- ScaleData(TS_BBB_ec, vars.to.regress = c("percent.mt", "nFeature_RNA", "nCount_RNA","G2M.Score","S.Score")) %>%
+  RunPCA(npcs=30, verbose=F) %>%
+  RunUMAP(dims=1:20)
+TS_BBB_stroma <- ScaleData(TS_BBB_stroma, vars.to.regress = c("percent.mt", "nFeature_RNA", "nCount_RNA","G2M.Score","S.Score")) %>%
+  RunPCA(npcs=30, verbose=F) %>%
+  RunUMAP(dims=1:20)
+
+```
+
+```{r colors for primary cells}
+
+colors_ec <- c("#88CCEE", # Bladder
+  "#AF90A9", # Brain
+  "#CE7677", # Eye
+  "#D8B177", # Fat
+  "#9CB161", # Heart
+  "#214E5B", # Intestine
+  "#267F3A", # Kidney
+  "#392388", # Liver
+  "#7E3792", # Lung
+  "#599499", # Mammary
+  "#63A373", # Muscle
+  "#949938", # Pancreas
+  "#905A44", # Prostate
+  "#84204C", # Skin
+  "#663435", # Thymus
+  "#6683AB", # Tongue
+  "#7491AF", # Trachea
+  "#888888" # Uterus
+  )
+
+colors_stroma <- c("#88CCEE", # Bladder
+  "#AF90A9", # Brain
+  "#CE7677", # Eye
+  "#D8B177", # Fat
+  "#9CB161", # Heart
+  "#214E5B", # Intestine
+  "#392388", # Liver
+  "#7E3792", # Lung
+  "#599499", # Mammary
+  "#63A373", # Muscle
+  "#949938", # Pancreas
+  "#905A44", # Prostate
+  "#663435", # Thymus
+  "#6683AB", # Tongue
+  "#7491AF", # Trachea
+  "#888888" # Uterus
+  )
+
+```
+
+# Explore in vitro time course data and tranplanted hBVO data
+## Endothelial in vitro and transplanted cells
+
+```{r load endothelial in vitro and transplanted cells}
+
+seurat_invitro_ec <- readRDS("~/data.seurat_untransplanted_noWTC_endoBranch_cleanedup.rds")
+seurat_transpl_ec <- readRDS("~/data.seurat_transplanted_endothelial.rds")
+
+```
+
+```{r generate correlation endo cells}
+
+TS_BBB_ec <- FindVariableFeatures(TS_BBB_ec, slot = "data", nfeatures = 1500)
+avg_expr_adult_ec <- sapply(sort(unique(TS_BBB_ec$organ_tissue)), function(org) rowMeans(TS_BBB_ec@assays$RNA@data[,which(TS_BBB_ec$organ_tissue == org)] ))
+avg_expr_invitro_ec <- rowMeans(seurat_invitro_ec@assays$RNA@data[,which(seurat_invitro_ec$RNA_css_snn_res.0.8 %in% c("18","11","5","6","20"))])
+avg_expr_transpl_ec <- rowMeans(seurat_transpl_ec@assays$RNA@data[,which(seurat_transpl_ec$RNA_snn_res.0.2 %in% c("0","1","3","4"))])
+
+vargenes <- intersect(VariableFeatures(TS_BBB_ec), unique(rownames(cbind(avg_expr_invitro_ec,avg_expr_transpl_ec))))
+
+# Calculate the pairwise Spearman correlation across the interesection of common variable genes between the fetal and adult reference endothelial dataasets
+corr2ref_invitro_ec <- cor(cbind(avg_expr_invitro_ec,avg_expr_transpl_ec)[vargenes,], avg_expr_adult_ec[vargenes,], method="spearman")
+bound <- cbind(avg_expr_invitro_ec,avg_expr_transpl_ec)
+colnames(bound) <- c("in vitro", "transplanted")
+
+# Plot as a heatmap
+pdf("Plots/adult_to_invitro_endo_organ_correlation.pdf")
+heatmap.2(corr2ref_invitro_ec, scale="none", trace="none", key=F, keysize=0.5,Rowv = F, Colv = F,
+          labRow = colnames(bound), labCol = colnames(avg_expr_adult_ec), cexRow=0.8, cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+dev.off()
+
+min(corr2ref_invitro_ec)
+max(corr2ref_invitro_ec)
+
+```
+## Stroma in vitro and transplanted cells
+
+```{r load stroma in vitro and transplanted cells}
+
+seurat_invitro <- readRDS("~/data.seurat_untransplanted_noWTC.rds")
+seurat_transpl_mural <- readRDS("~/data.seurat_transplanted_mural.rds")
+
+```
+
+```{r generate correlation stroma cells}
+
+# Subset mural cells from in vitro
+Idents(seurat_invitro) <- "RNA_css_snn_res.0.8"
+seurat_invitro_mural <- subset(seurat_invitro, idents = c("1","8","7","16"))
+
+TS_BBB_stroma <- FindVariableFeatures(TS_BBB_stroma, slot = "data", nfeatures = 1500)
+avg_expr_adult_stroma <- sapply(sort(unique(TS_BBB_stroma$organ_annotation)), function(org) rowMeans(TS_BBB_stroma@assays$RNA@data[,which(TS_BBB_stroma$organ_annotation == org)] ))
+avg_expr_invitro_mural <- rowMeans(seurat_invitro_mural@assays$RNA@data)
+avg_expr_transpl_mural <- rowMeans(seurat_transpl_mural@assays$RNA@data)
+
+vargenes <- intersect(VariableFeatures(TS_BBB_stroma), unique(rownames(cbind(avg_expr_invitro_mural,avg_expr_transpl_mural))))
+
+# Calculate the pairwise Spearman correlation across the interesection of common variable genes between the fetal and adult reference endothelial dataasets
+corr2ref_invitro_mural <- cor(cbind(avg_expr_invitro_mural,avg_expr_transpl_mural)[vargenes,], avg_expr_adult_stroma[vargenes,], method="spearman")
+bound <- cbind(avg_expr_invitro_mural,avg_expr_transpl_mural)
+colnames(bound) <- c("in vitro", "transplanted")
+
+# Plot as a heatmap
+pdf("Plots/adult_to_invitro_mural_organ_correlation.pdf")
+heatmap.2(corr2ref_invitro_mural, scale="none", trace="none", key=F, keysize=0.5,Rowv = F, Colv = F,
+          labRow = colnames(bound), labCol = colnames(avg_expr_adult_stroma), cexRow=0.8, cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+dev.off()
+
+min(corr2ref_invitro_mural)
+max(corr2ref_invitro_mural)
+
+```
+
+```{r plot disorder gene expression}
+
+genes_disorders <- read.table("~/tab.vascular_disorder_genes.tsv", sep="\t", header=F)
+genes_disorders <- genes_disorders[genes_disorders[,1] %in% rownames(TS_BBB_ec@assays$RNA@data) & genes_disorders[,1] %in% rownames(seurat_invitro_ec),] & genes_disorders[genes_disorders[,1] %in% rownames(TS_BBB_stroma@assays$RNA@data) & genes_disorders[,1] %in% rownames(seurat_invitro_mural),]
+
+mat2 <- apply(cbind(as.matrix(avg_expr_adult_ec[genes_disorders[,1],]),
+                    avg_expr_invitro_ec[genes_disorders[,1]],
+                    avg_expr_transpl_ec[genes_disorders[,1]],
+                    avg_expr_adult_stroma[genes_disorders[,1],],
+                    avg_expr_invitro_mural[genes_disorders[,1]],
+                    avg_expr_transpl_mural[genes_disorders[,1]]), 1, function(x) x/max(x))
+
+gplots::heatmap.2(t(mat2), Rowv=NA, Colv=NA, dendrogram="none", key=F, keysize=0.2, col=bluewhitered_colscheme(30), scale="none", trace="none",
+                  labCol = c(colnames(avg_expr_adult_ec), "in vitro hBVO EC", "transplanted hBVO EC",colnames(avg_expr_adult_stroma), "in vitro hBVO mural cells", "transplanted hBVO mural cells"),
+                  rowsep = sapply(0:length(unique(genes_disorders[,2])), function(i) sum(table(genes_disorders[,2])[0:i])), sepcolor = "#303030", sepwidth = c(0.3,0.3), margins = c(10,6), cexCol = 0.5)
+
+```
+
+#### RSS to Crouch primary brain mural and endothelial cells
+
+```{r preprocess Crouch reference}
+
+# I noticed that some ECs are labeled as pericytes (comparing to the original publication and marker genes), therefore I rename them based on the clusters in which they are
+crouch_seurat$cell_type_MN <- crouch_seurat$seurat_clusters
+Idents(crouch_seurat) <- "cell_type_MN"
+crouch_seurat$cell_type_MN <- factor(setNames(c("pericyte",
+           "pericyte",
+           "endothelial",
+           "endothelial",
+           "pericyte",
+           "pericyte",
+           "endothelial",
+           "pericyte",
+            "pericyte",
+           "endothelial",
+           "endothelial",
+           "pericyte",
+            "pericyte"), levels(crouch_seurat@active.ident))[crouch_seurat@active.ident])
+
+crouch_seurat_EC <- subset(crouch_seurat, idents = "endothelial")
+crouch_seurat_pericyte <- subset(crouch_seurat, idents = "pericyte")
+
+DefaultAssay(crouch_seurat) <- "integrated"
+crouch_seurat <- FindNeighbors(crouch_seurat, dims = 1:20) %>%
+                FindClusters(resolution = 10)
+
+#################### ALL CELLS #################### 
+
+# Generate uwot model
+umap_model <- uwot::umap(Embeddings(crouch_seurat,"pca")[,1:20], metric="cosine", ret_model=T, n_neighbors=30L, n_components=2L, n_epochs=NULL, learning_rate=1.0, min_dist=0.3, spread=1.0, set_op_mix_ratio=1.0, local_connectivity=1L, repulsion_strength=1, negative_sample_rate=5, a=NULL, b=NULL, fast_sgd=F)
+umap_model$embedding <- Embeddings(crouch_seurat,"umap")
+
+# high-res clusters for projection
+avg_pca_niches <- t(sapply(levels(crouch_seurat$integrated_snn_res.10), function(cl) colMeans(Embeddings(crouch_seurat,"pca")[which(crouch_seurat$integrated_snn_res.10==cl),1:20])))
+avg_expr_niches <- sapply(levels(crouch_seurat$integrated_snn_res.10), function(cl) rowMeans(crouch_seurat@assays$RNA@data[,which(crouch_seurat$integrated_snn_res.10==cl),]))
+umap_niche_projected <- umap_transform(X=avg_pca_niches, model=umap_model)
+meta_niches <- setNames(data.frame(sapply(c("cell_type_MN","age","area"), function(col) sapply(levels(crouch_seurat$integrated_snn_res.10), function(cl) names(which.max(table(crouch_seurat@meta.data[which(crouch_seurat$integrated_snn_res.10 == cl),col])))))), c("cell_type_MN","age","area"))
+meta_niches$cell_type_MN <- factor(meta_niches$cell_type_MN)
+meta_niches$age <- factor(meta_niches$age)
+meta_niches$area <- factor(meta_niches$area)
+
+vargenes_niches <- VariableFeatures(crouch_seurat)
+
+
+#################### ENDOTHELIAL CELLS #################### 
+
+DefaultAssay(crouch_seurat_EC) <- "integrated"
+crouch_seurat_EC <-  RunPCA(crouch_seurat_EC, npc = 50) %>%
+                RunUMAP(dims = 1:20) %>%
+                FindNeighbors(dims = 1:20) %>%
+                FindClusters(resolution = 0.5) %>%
+                FindClusters(resolution = 10)
+DimPlot(crouch_seurat_EC, reduction = "umap", group.by = "integrated_snn_res.10")
+
+# Generate uwot model
+umap_model_EC <- uwot::umap(Embeddings(crouch_seurat_EC,"pca")[,1:20], metric="cosine", ret_model=T, n_neighbors=30L, n_components=2L, n_epochs=NULL, learning_rate=1.0, min_dist=0.3, spread=1.0, set_op_mix_ratio=1.0, local_connectivity=1L, repulsion_strength=1, negative_sample_rate=5, a=NULL, b=NULL, fast_sgd=F)
+umap_model_EC$embedding <- Embeddings(crouch_seurat_EC,"umap")
+
+# high-res clusters for projection
+avg_pca_niches_EC <- t(sapply(levels(crouch_seurat_EC$integrated_snn_res.10), function(cl) colMeans(Embeddings(crouch_seurat_EC,"pca")[which(crouch_seurat_EC$integrated_snn_res.10==cl),1:20])))
+avg_expr_niches_EC <- sapply(levels(crouch_seurat_EC$integrated_snn_res.10), function(cl) rowMeans(crouch_seurat_EC@assays$RNA@data[,which(crouch_seurat_EC$integrated_snn_res.10==cl),]))
+umap_niche_projected_EC <- umap_transform(X=avg_pca_niches_EC, model=umap_model_EC)
+meta_niches_EC <- setNames(data.frame(sapply(c("cell_type_MN","age","area"), function(col) sapply(levels(crouch_seurat_EC$integrated_snn_res.10), function(cl) names(which.max(table(crouch_seurat_EC@meta.data[which(crouch_seurat_EC$integrated_snn_res.10 == cl),col])))))), c("cell_type_MN","age","area"))
+meta_niches_EC$cell_type_MN <- factor(meta_niches_EC$cell_type_MN)
+meta_niches_EC$age <- factor(meta_niches_EC$age)
+meta_niches_EC$area <- factor(meta_niches_EC$area)
+
+vargenes_niches_EC <- VariableFeatures(crouch_seurat_EC)
+
+
+#################### MURAL CELLS #################### 
+
+DefaultAssay(crouch_seurat_pericyte) <- "integrated"
+crouch_seurat_pericyte <-  RunPCA(crouch_seurat_pericyte, npc = 50) %>%
+                RunUMAP(dims = 1:20) %>%
+                FindNeighbors(dims = 1:20) %>%
+                FindClusters(resolution = 0.5) %>%
+                FindClusters(resolution = 10)
+DimPlot(crouch_seurat_pericyte, reduction = "umap", group.by = "integrated_snn_res.10")
+
+# Generate uwot model
+umap_model_pericyte <- uwot::umap(Embeddings(crouch_seurat_pericyte,"pca")[,1:20], metric="cosine", ret_model=T, n_neighbors=30L, n_components=2L, n_epochs=NULL, learning_rate=1.0, min_dist=0.3, spread=1.0, set_op_mix_ratio=1.0, local_connectivity=1L, repulsion_strength=1, negative_sample_rate=5, a=NULL, b=NULL, fast_sgd=F)
+umap_model_pericyte$embedding <- Embeddings(crouch_seurat_pericyte,"umap")
+
+# high-res clusters for projection
+avg_pca_niches_pericyte <- t(sapply(levels(crouch_seurat_pericyte$integrated_snn_res.10), function(cl) colMeans(Embeddings(crouch_seurat_pericyte,"pca")[which(crouch_seurat_pericyte$integrated_snn_res.10==cl),1:20])))
+avg_expr_niches_pericyte <- sapply(levels(crouch_seurat_pericyte$integrated_snn_res.10), function(cl) rowMeans(crouch_seurat_pericyte@assays$RNA@data[,which(crouch_seurat_pericyte$integrated_snn_res.10==cl),]))
+umap_niche_projected_pericyte <- umap_transform(X=avg_pca_niches_pericyte, model=umap_model_pericyte)
+meta_niches_pericyte <- setNames(data.frame(sapply(c("cell_type_MN","age","area"), function(col) sapply(levels(crouch_seurat_pericyte$integrated_snn_res.10), function(cl) names(which.max(table(crouch_seurat_pericyte@meta.data[which(crouch_seurat_pericyte$integrated_snn_res.10 == cl),col])))))), c("cell_type_MN","age","area"))
+meta_niches_pericyte$cell_type_MN <- factor(meta_niches_pericyte$cell_type_MN)
+meta_niches_pericyte$age <- factor(meta_niches_pericyte$age)
+meta_niches_pericyte$area <- factor(meta_niches_pericyte$area)
+
+vargenes_niches_pericyte <- VariableFeatures(crouch_seurat_pericyte)
+
+```
+
+```{r similarity spectrum to Crouch reference}
+
+#################### ALL CELLS #################### 
+
+# Calculate Reference Similarity Spectrum (RSS)
+sim2_crouch_niches <- ref_sim_spectrum(seurat@assays$RNA@data, avg_expr_niches[vargenes_niches,], scale=F)
+dimnames(sim2_crouch_niches) <- list(colnames(seurat), colnames(avg_expr_niches))
+
+# max sim 0.7971078
+# min sim  -0.0248003
+
+avg_expr_highres <- sapply(levels(seurat$RNA_snn_res.1), function(cl) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_snn_res.1==cl)]))
+sim2_highres <- ref_sim_spectrum(seurat@assays$RNA@data, avg_expr_highres[intersect(vargenes_niches,rownames(avg_expr_highres)),], scale=F)
+summary(apply(sim2_highres,1,max)[idx])
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.1803  0.6893  0.7601  0.7395  0.8066  0.9213 
+
+
+
+#################### ENDOTHELIAL CELLS #################### 
+
+
+# Calculate Reference Similarity Spectrum (RSS)
+sim2_crouch_niches_EC <- ref_sim_spectrum(seurat_endo@assays$RNA@data, avg_expr_niches_EC[vargenes_niches_EC,], scale=F)
+dimnames(sim2_crouch_niches_EC) <- list(colnames(seurat_endo), colnames(avg_expr_niches_EC))
+
+#################### PERICYTE CELLS #################### 
+
+
+# Calculate Reference Similarity Spectrum (RSS)
+sim2_crouch_niches_pericyte <- ref_sim_spectrum(seurat_mural@assays$RNA@data, avg_expr_niches_pericyte[vargenes_niches_pericyte,], scale=F)
+dimnames(sim2_crouch_niches_pericyte) <- list(colnames(seurat_mural), colnames(avg_expr_niches_pericyte))
+
+```

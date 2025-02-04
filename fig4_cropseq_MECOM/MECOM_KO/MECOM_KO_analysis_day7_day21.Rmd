@@ -1,0 +1,2710 @@
+---
+title: "MECOM KO analysis"
+author: "Marina Nikolova"
+date: "17/05/2023"
+output: html_document
+---
+
+Interesting articles to consider:
+- report of different effects of MECOM (EVI1 on cell cycle depending on the cell type: Overexpression of EVI1 interferes with cytokinesis and leads to accumulation of cells with supernumerary centrosomes in G0/1 phase. Karakaya et al. 2012 https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3467026/ 
+- good review; also highlights the controversial findings in MECOM overexpression and KO/KD studies: https://www.sciencedirect.com/science/article/pii/S0378111907001849#fig2
+
+From the data:
+EVI1 suppresses CEBPE. CEBPE suppresses MYC. Therefore, MECOM (EVI1) KO is expected to lead to MYC upregualtion and this is what we see
+Ref: Glass et al. 2013. Global Identification of EVI1 Target Genes in Acute Myeloid Leukemia. PLoS one
+
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+library(ggrepel)
+library(uwot)
+library(clusterProfiler)
+library(enrichplot)
+library("org.Hs.eg.db")
+library("AnnotationDbi")
+library(ReactomePA)
+library(forcats)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+source("/links/groups/treutlein/USERS/zhisong_he/Tools/scripts/perturb_prob.r")
+
+```
+
+
+Load data
+```{r load seurat object}
+
+seurat <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/MECOM_KO_css_integrated_seurat.rds")
+ec <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/MECOM_KO_css_integrated_seurat_endothelial.rds")
+meso <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/MECOM_KO_css_integrated_seurat_mesoderm.rds")
+mural <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/MECOM_KO_css_integrated_seurat_mural.rds")
+
+write.csv(VariableFeatures(seurat), "Plots/variable_features.csv")
+
+```
+
+```{r generate needed color palettes and levels}
+
+show_col(c(c("#1F618D","#2874A6"),
+                     colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(5),
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4),
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(7), 
+                     c("#BFC9CA","#566573","#273746")))
+
+# Define colors for samples
+mecom_ko_levels <- factor(c("wt_1_day7", "wt_2_day7", #"A2_day7", 
+                            "B1_17_1_day7", "B1_17_2_day7", "D2_22_1_day7", "D2_22_2_day7", #"G8_1_1_day7", 
+                            "wt_1_day21", "wt_2_day21", "wt_3_day21", "wt_4_day21", "B1_17_1_day21", "B1_17_2_day21", "D2_22_1_day21", "D2_22_2_day21", "D2_22_3_day21" #, "G8_1_1_day21"
+                            ))
+col_sample <-setNames(c(c("#F39229", "#F07F27", #"#ED6D26", 
+                          "#E9C92E", "#D5C62A", "#42B8AE", "#3EB3BD", #"#7378B7", 
+                          "#EA5D27", "#E5512C", "#E04432", "#DC3838", "#CBC528", "#A8C130", "#3EADC8", "#3EA7D2", "#489CD3" #, "#8966A9"
+                          )), mecom_ko_levels)
+
+# Define colors for RNA_css_snn_res.0.4
+avg_av_cond_cl <- sapply(levels(seurat$RNA_css_snn_res.0.4), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_css_snn_res.0.4==x)]))
+hcl_cl <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl[VariableFeatures(seurat),])), method="ward.D2")
+cols_cl <- setNames(colorRampPalette(c("#8966A9", "#0A4A3D", "#876E08", 
+                                       "#F7DC6F", "#F1C40F", "#B7950B",  
+                                       "#E74C3C","#B03A2E",
+                                       "#73C6B6", "#43A995","#138D75", "#0E6B59"))(length(levels(seurat$RNA_css_snn_res.0.4))), levels(seurat$RNA_css_snn_res.0.4)[hcl_cl$order])
+res.0.4_levels <- c(11,10,2,3,0,1,7,8,9,6,4,5)
+cl_levels <- c(9,6,5,4,10,0,1,3,2,11,7,8)
+
+# Define colors for RNA_css_snn_res.0.1
+avg_av_cond_cl <- sapply(levels(seurat$RNA_css_snn_res.0.1), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_css_snn_res.0.1==x)]))
+hcl_cl <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl[VariableFeatures(seurat),])), method="ward.D2")
+cols_cl <- setNames(colorRampPalette(c("#8966A9","#E74C3C","#B03A2E","#F7DC6F","#F5D44F", "#F3CC2F", "#F1C40F", "#DDB40D", "#CAA40C", "#B7950B","#138D75", "#279C85", "#3BAB95", "#4EB6A2", "#60BEAC", "#73C6B6"))(length(levels(seurat$RNA_css_snn_res.0.1))), levels(seurat$RNA_css_snn_res.0.1)[hcl_cl$order])
+res.0.1_levels <- c(15,6,10,3,8,0,1,13,2,9,14,11,12,7,4,5)
+
+```
+
+
+# Find cluster markers
+
+```{r find cluster markers res.0.4}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+
+table(seurat$orig.ident, seurat$RNA_css_snn_res.0.4)
+
+cl_markers_res.0.4 <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers_res.0.4 <- cl_markers_res.0.4 %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top3_cl_markers_res.0.4 <- cl_markers_res.0.4 %>% group_by(cluster) %>%  slice_max(n = 3, order_by = avg_log2FC)
+top10_cl_markers_res.0.4 <- cl_markers_res.0.4 %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.4 <- cl_markers_res.0.4 %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.4 <- cl_markers_res.0.4 %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.4, "Plots/top_cl_markers_res.0.4.csv")
+write.csv(top50_cl_markers_res.0.4, "Plots/top50_cl_markers_res.0.4.csv")
+
+top_cl_markers_unique <- top3_cl_markers_res.0.4[!duplicated(top3_cl_markers_res.0.4[ , "gene"]), ]  # Delete rows
+top2_cl_markers_unique <- top_cl_markers_unique %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+# Remove mitochondria and ribosome genes from the list
+blacklist <- c(grep("^MT-", cl_markers_res.0.4$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(cl_markers_res.0.4$gene, blacklist)
+cl_markers_res.0.4_no_MT_RP <- cl_markers_res.0.4 %>% filter(gene %in% diff_genes)
+nrow(cl_markers_res.0.4_no_MT_RP)
+
+# Redo top marker selection
+top2_cl_markers_res.0.4_no_MT_RP <- cl_markers_res.0.4_no_MT_RP %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC) 
+top5_cl_markers_res.0.4_no_MT_RP <- cl_markers_res.0.4_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC) 
+top10_cl_markers_res.0.4_no_MT_RP <- cl_markers_res.0.4_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.4_no_MT_RP <- cl_markers_res.0.4_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.4_no_MT_RP <- cl_markers_res.0.4_no_MT_RP %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.4_no_MT_RP, "Plots/top_cl_markers_res.0.4_no_MT_RP.csv")
+write.csv(top50_cl_markers_res.0.4_no_MT_RP, "Plots/top50_cl_markers_res.0.4_no_MT_RP.csv")
+
+```
+
+#### Plot cluster markers
+
+```{r heatmap top markers by cluster res.0.4, fig.height=7, fig.width=4}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+levels(seurat) <- cl_levels
+seurat$RNA_css_snn_res.0.4 <- factor(seurat$RNA_css_snn_res.0.4, levels=cl_levels)
+
+top2_cl_markers_unique <- top2_cl_markers_unique %>% group_by(cluster)  %>% arrange(factor(cluster, levels=cl_levels))
+
+library(gplots)
+avg_cond_cl <- sapply(levels(seurat$RNA_css_snn_res.0.4), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_css_snn_res.0.4==x)]))
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+mat_norm <- apply(avg_cond_cl[top2_cl_markers_unique$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- top2_cl_markers_unique$gene
+mat_norm <- mat_norm[,col.order]
+
+pdf("Plots/heatmap_scaled_top2_markers_cl_res.0.4.pdf", width = 5, height = 14)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+
+```{r cell proportions within all cells}
+
+cl_levels <- c(9,6,5,4,10,3,0,1,2,11,7,8)
+
+png("Plots/cell_prop_RNA_css_snn_res.0.4_orig.ident.png", width = 2450, height = 2250, res=500)
+df <- as.data.frame(table(seurat$RNA_css_snn_res.0.4, seurat$orig.ident))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.4"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+ggplot(df, aes(fill=factor(RNA_css_snn_res.0.4, level=cl_levels), y=Freq, x=orig.ident)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values= cols_cl) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+png("Plots/cell_prop_RNA_css_snn_res.0.4_sample_timepoint.png", width = 2450, height = 2250, res=500)
+df <- as.data.frame(table(seurat$RNA_css_snn_res.0.4, seurat$sample_timepoint))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.4"
+colnames(df)[which(names(df) == "Var2")] <- "sample_timepoint"
+
+ggplot(df, aes(fill=factor(RNA_css_snn_res.0.4, level=cl_levels), y=Freq, x=sample_timepoint)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values= cols_cl) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+df <- as.data.frame(table(seurat$RNA_css_snn_res.0.4, seurat$orig.ident))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.4"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+png("Plots/cell_prop_orig.ident_RNA_css_snn_res.0.4.png", width = 2450, height = 2250, res=500)
+ggplot(df, aes(fill=orig.ident, y=Freq, x=RNA_css_snn_res.0.4)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values= col_sample) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+df <- as.data.frame(table(seurat$Phase, seurat$sample_timepoint))
+colnames(df)[which(names(df) == "Var1")] <- "Phase"
+colnames(df)[which(names(df) == "Var2")] <- "sample_timepoint"
+
+png("Plots/cell_prop_sample_timepoint_cell_phase.png", width = 1550, height = 1850, res=500)
+ggplot(df, aes(fill=Phase, y=Freq, x=sample_timepoint)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values= c("#bdbdbd", "#737373",  "#252525")) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+```
+
+
+# Perform label transfer from the time course data
+
+```{r label transfer from time course}
+
+# Load the time course seurat
+ref <- readRDS("/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/data/data.seurat_untransplanted_noWTC.rds")
+levels(ref$annot_celltype) <- as.factor( c(0,3,4,9,10,13,2,7,1,8,16,14,15,18,11,5,6,20,17,19,12))
+
+# Prep the color palette
+ref_col <- setNames(c(c("#1F618D","#2874A6"),                                # PSC colors
+                     colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(5), # mesoderm colors
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4), # mural colors
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(7), # endothelial colors
+                     c("#BFC9CA","#566573","#273746")),                     # other cluster colors
+                   c(0,3,                # PSC clusters
+                     4,9,10,13,2,        # mesoderm clusters
+                     7,1,8,16,           # mural cell clusters
+                     14,15,18,11,5,6,20, # endothelial cell clusters
+                     17,19,12))          # other clusters
+
+# Plot reference data 
+plot1 <- DimPlot(ref, group.by="day", reduction="umap_css")  & NoAxes()
+plot2 <- DimPlot(ref, group.by="annot_celltype", reduction="umap_css") & NoAxes()
+plot3 <- FeaturePlot(ref, c("PDGFRB","PECAM1","DCN","KDR","TFPI2","MKI67"),reduction = "umap_css", order = T, ncol=3, pt.size = 0.1, cols = blue_colscheme(10)) & NoAxes() & NoLegend()
+((plot1 / plot2) | plot3) + plot_layout(width = c(1,3))
+DimPlot(ref, group.by="RNA_css_snn_res.0.8", reduction="umap_css", cols = ref_col)
+
+# Perform Seurat-based label transfer
+anchors <- FindTransferAnchors(reference = ref, query = seurat, dims = 1:30, npcs = 30, reduction = "rpca", reference.reduction = "pca")
+predictions <- TransferData(anchorset = anchors, refdata = ref$RNA_css_snn_res.0.8, dims = 1:30)
+seurat$celltype_transfer <- predictions$predicted.id
+levels(seurat$celltype_transfer) <- as.factor( c(0,3,4,9,10,13,2,7,1,8,16,14,15,18,11,5,6,20,17,19,12))
+
+# Plot Seurat label transfer
+plot1 <- DimPlot(seurat, reduction = "umap_css", group.by = "orig.ident", label = F, label.size = 4, repel = T, pt.size = 1.3, cols=col_sample) & NoAxes() 
+plot2 <- DimPlot(seurat, reduction = "umap_css", group.by="celltype_transfer", label=T,  cols = ref_col, pt.size = 1.3)
+plot3 <- DimPlot(ref, group.by="RNA_css_snn_res.0.8", reduction="umap_css", label=T,  cols = ref_col, pt.size = 1.3)
+plot4 <- DimPlot(seurat, reduction = "umap_css", group.by = "RNA_css_snn_res.0.4",cols = col_ct, label = F, label.size = 4, repel = T, pt.size = 1.3) & NoAxes()
+plot1 | plot2
+plot2 | plot3
+plot2 | plot4
+
+# Feature plots of some marker genes
+FeaturePlot(seurat, c("PDGFRB","PECAM1","DCN","MECOM","TFPI2","ETV2"),reduction = "umap_css", order = T, ncol=3, pt.size = 0.1, cols = blue_colscheme(10)) & NoAxes() & NoLegend()
+FeaturePlot(ref, c("PDGFRB","PECAM1","DCN","MECOM","TFPI2","ETV2"),reduction = "umap_css", order = T, ncol=3, pt.size = 0.1, cols = blue_colscheme(10)) & NoAxes() & NoLegend()
+
+
+# Project the query data onto the reference UMAP structure
+seurat <- MapQuery(anchorset = anchors, reference = ref, query = seurat,
+    refdata = list(celltype = "RNA_css_snn_res.0.8"), reference.reduction = "pca", reduction.model = "umap_css")
+
+
+plot5 <- DimPlot(seurat, reduction = "ref.umap", group.by = "predicted.celltype", label = TRUE,
+    label.size = 3, cols = ref_col,repel = TRUE) + NoLegend() + ggtitle("Query transferred labels by transfered cluster")
+plot6 <- DimPlot(seurat, reduction = "ref.umap", group.by = "orig.ident", label = TRUE,
+    label.size = 3, cols = col_sample,repel = TRUE) + NoLegend() + ggtitle("Query transferred labels by sample")
+plot7 <- DimPlot(seurat, reduction = "ref.umap", group.by = "orig.ident", split.by = "orig.ident", label = TRUE,
+    label.size = 3, cols = col_sample,repel = TRUE) + NoLegend() + ggtitle("Query transferred labels by sample")
+plot3 + plot5 + plot6
+plot7
+DimPlot(seurat, reduction = "ref.umap", group.by = "RNA_css_snn_res.0.4", label = TRUE,pt.size=1, label.size = 3, cols = col_ct,repel = TRUE, split.by = "RNA_css_snn_res.0.4") + NoLegend() + ggtitle("Query transferred labels by sample")
+DimPlot(seurat, reduction = "ref.umap", group.by = "RNA_css_snn_res.0.4", label = TRUE,pt.size=1, label.size = 3, cols = col_ct,repel = TRUE) + NoLegend() + ggtitle("Query transferred labels by sample")
+
+DimPlot(ref, reduction = "umap_css", group.by = "timepoint", split.by = "timepoint", label = F, label.size = 4, repel = T) & NoAxes()
+
+pdf("Plots/umap_label_transfer_timecourse.pdf", width = 11, height = 6)
+plot2 | plot3
+dev.off()
+
+
+# create a dataset
+df <- as.data.frame(table(seurat$celltype_transfer, seurat$orig.ident))
+df$Var2 <- factor(x = df$Var2, levels = mecom_ko_levels)
+colnames(df)[which(names(df) == "Var1")] <- "celltype_transfer"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+pdf("Plots/stckd_barplot_cluster_per_sample_celltype_transfer.pdf", width = 5, height = 6)
+ggplot(df, aes(fill=factor(celltype_transfer, levels = c(
+                     0,3,                # PSC clusters
+                     4,9,10,13,2,        # mesoderm clusters
+                     7,1,8,16,           # mural cell clusters
+                     14,15,18,11,5,6,20, # endothelial cell clusters
+                     17,19,12)), y=Freq, x=orig.ident)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proporion of cells") +
+    scale_fill_manual(values= ref_col) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) + 
+    labs(fill='Cluster based on label transfer') 
+dev.off()
+
+
+# create a dataset
+df <- as.data.frame(table(seurat$celltype_transfer, seurat$condition))
+df$Var2 <- factor(x = df$Var2, levels = c("KO","WT"))
+colnames(df)[which(names(df) == "Var1")] <- "celltype_transfer"
+colnames(df)[which(names(df) == "Var2")] <- "condition"
+
+pdf("Plots/stckd_barplot_cluster_per_condition_celltype_transfer.pdf", width = 5, height = 6)
+ggplot(df, aes(fill=factor(celltype_transfer, levels = c(
+                     0,3,                # PSC clusters
+                     4,9,10,13,2,        # mesoderm clusters
+                     7,1,8,16,           # mural cell clusters
+                     14,15,18,11,5,6,20, # endothelial cell clusters
+                     17,19,12)), y=Freq, x=condition)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Condition") + 
+    ylab("Proporion of cells") +
+    scale_fill_manual(values= ref_col) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) + 
+    labs(fill='Cluster based on label transfer') 
+dev.off()
+
+
+```
+
+# Differential expression analysis between conditions
+
+#### Basic DE analysis
+```{r general similarity}
+
+# General transcriptomic similarity between clone BVOs
+pdf("Plots/hclust_seurat_integrated.pdf", width = 5, height = 8)
+Idents(seurat) <- "orig.ident"
+
+avg_expr_sample <- sapply(sort(unique(seurat$orig.ident)), function(orig.ident)
+rowMeans(seurat@assays$RNA@data[,which(seurat$orig.ident == orig.ident)]))
+colnames(avg_expr_sample) <- mecom_ko_levels
+corr_sample <- cor(avg_expr_sample[VariableFeatures(seurat),])
+corr_sample
+plot(hclust(as.dist(1-corr_sample)))
+table(seurat$orig.ident)
+dev.off()
+
+
+pdf("Plots/hclust_ECs.pdf", width = 5, height = 8)
+# ECs only
+Idents(ec) <- "orig.ident"
+
+avg_expr_sample <- sapply(sort(unique(ec$orig.ident)), function(orig.ident)
+rowMeans(ec@assays$RNA@data[,which(ec$orig.ident == orig.ident)]))
+colnames(avg_expr_sample) <- mecom_ko_levels
+corr_sample <- cor(avg_expr_sample[VariableFeatures(ec),])
+corr_sample
+plot(hclust(as.dist(1-corr_sample)))
+table(ec$orig.ident)
+dev.off()
+
+# mural cells only
+pdf("Plots/hclust_mural_cells.pdf", width = 5, height = 8)
+Idents(mural) <- "orig.ident"
+
+avg_expr_sample <- sapply(sort(unique(mural$orig.ident)), function(orig.ident)
+rowMeans(mural@assays$RNA@data[,which(mural$orig.ident == orig.ident)]))
+colnames(avg_expr_sample) <- mecom_ko_levels
+corr_sample <- cor(avg_expr_sample[VariableFeatures(mural),])
+corr_sample
+plot(hclust(as.dist(1-corr_sample)))
+table(mural$orig.ident)
+dev.off()
+
+```
+
+#### Perform wlicoxon test
+```{r wilcoxon test on all cells}
+
+Idents(seurat) <- "condition"
+# Run wilcoxon test
+DE_wilcoxauc_seurat <- wilcoxauc(seurat, group_by = "condition") %>%
+  filter(group == "KO") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_seurat <- DE_wilcoxauc_seurat %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_seurat) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_seurat$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_seurat$feature,blacklist)
+DE_wilcoxauc_seurat <- DE_wilcoxauc_seurat %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_seurat)
+
+# plot
+pdf("Plots/volcano_DE_all.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_seurat, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_text_repel(max.overlaps = 50) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#F1C619", "gray50", "#D44637")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_seurat, "Plots/DE_wilcoxauc_seurat.csv")
+
+```
+
+```{r wilcoxon test all clusters separately RNA_css_snn_res.0.4}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+# Split seurat object into a list based on the cluster in RNA_css_snn_res.0.1
+seurat.clusters <- SplitObject(seurat, split.by = "RNA_css_snn_res.0.4")
+
+# Generate a list of data frames with DEGs
+seurat_de_tab <- lapply(seurat.clusters, function(cl){
+  seurat_de_tab <- wilcoxauc(cl, group_by = "condition") %>%
+    filter(group == "KO") %>%
+    mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+    mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))%>% 
+    mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated", logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated", TRUE ~ "Unchanged"))
+  blacklist <- c(grep("^MT-", seurat_de_tab$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+  diff_genes <- setdiff(seurat_de_tab$feature,blacklist)
+  seurat_de_tab <- seurat_de_tab %>% filter(feature %in% diff_genes)
+})
+
+seurat_de_tab <- seurat_de_tab[c("9", "6", "5", "4", "10", "0",  "1",  "3",  "2",  "11", "7",  "8" )]
+
+# Add number of DEGs 
+seurat_no.up <- c()
+seurat_no.down <- c()
+for (i in seurat_de_tab) {
+  seurat_no.up <- rbind(seurat_no.up, sum(i$outcome == "Up-regulated"))
+  seurat_no.down <- rbind(seurat_no.down, sum(i$outcome ==  "Down-regulated"))
+}
+
+# Createa a table with no. DEGs
+seurat_no.DEGs <- matrix(c("9", "6", "5", "4", "10", "0",  "1",  "3",  "2",  "11", "7",  "8"), ncol=1, byrow=TRUE)
+seurat_no.DEGs <- as.data.frame(seurat_no.DEGs)
+colnames(seurat_no.DEGs) <- c("cluster")
+
+seurat_no.DEGs$no.up <- seurat_no.up
+seurat_no.DEGs$no.down <- seurat_no.down
+seurat_no.DEGs$no.total <- seurat_no.down + seurat_no.up
+# seurat$RNA_css_snn_res.0.4 <- factor(seurat$RNA_css_snn_res.0.4, levels=c(0,1,2,3)) # Change the order just for ease addition to the table
+seurat_no.DEGs$no.cells <- as.integer(table(seurat$RNA_css_snn_res.0.4))
+# seurat$RNA_css_snn_res.0.4 <- factor(seurat$RNA_css_snn_res.0.4, levels=c(3,2,0,1))  # Return to the original order for future use
+seurat_no.DEGs <- seurat_no.DEGs[order(-seurat_no.DEGs$no.total),] 
+seurat_no.DEGs$cluster <- factor(seurat_no.DEGs$cluster,levels =seurat_no.DEGs$cluster)
+#7  5  8  2  1  4  6  3  0  9  10 11
+
+# Define colors
+col_order_degs_seurat_cl <- c("#E74C3C","#138D75","#B03A2E","#876F08","#B7950B","#0E6B59","#43A995","#F7DC6F","#F1C40F","#73C6B6","#0A4A3D","#8966A9")
+
+# Plot 
+pdf("Plots/seurat_cl_lollipop_DEGs_up.pdf", height = 3, width = 5)
+ggplot(seurat_no.DEGs, aes(x = cluster, y = no.up)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.up), col = col_order_degs_seurat_cl) +
+  geom_point(aes(x=cluster, y=no.up), size = 8, col = col_order_degs_seurat_cl) +
+  geom_text(aes(x=cluster,  y=no.up, label = no.up), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of up-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/seurat_cl_lollipop_DEGs_down.pdf", height = 3, width = 5)
+ggplot(seurat_no.DEGs, aes(x = cluster, y = no.down)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.down), col = col_order_degs_seurat_cl) +
+  geom_point(aes(x=cluster, y=no.down), size = 8, col = col_order_degs_seurat_cl) +
+  geom_text(aes(x=cluster,  y=no.down, label = no.down), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of down-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/seurat_cl_lollipop_DEGs_total.pdf", height = 2, width = 4)
+ggplot(seurat_no.DEGs, aes(x = cluster), y = no.total) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.total), col = "gray50") +
+  geom_point(aes(x=cluster, y=no.total, size = no.cells), col = col_order_degs_seurat_cl) +
+  #geom_text(aes(x=cluster,  y=no.total, label = no.total), color = "black", size = 3) +
+  theme_classic() +
+  ylim(0,1200) +
+  xlab("Cluster") + 
+  ylab("Number of DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+write.csv(seurat_de_tab, "Plots/seurat_DE_wilcoxauc_all_cl_separately.csv") # Cluster order is "9", "6", "5", "4", "10", "0",  "1",  "3",  "2",  "11", "7",  "8"
+# sapply(names(de_tab), 
+#  function (x) write.csv(de_tab[[x]], file=paste("Plots/EC_DE_wilcoxauc_",x, ".csv")))
+
+```
+
+```{r wicoxon test on cluster 8}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+cl8 <- subset(seurat, idents = c(8))
+
+# Run wilcoxon test
+DE_wilcoxauc_cl8 <- wilcoxauc(cl8, group_by = "condition") %>%
+  filter(group == "KO") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_cl8 <- DE_wilcoxauc_cl8 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_cl8) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_cl8$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_cl8 <- setdiff(DE_wilcoxauc_cl8$feature,blacklist)
+DE_wilcoxauc_cl8 <- DE_wilcoxauc_cl8 %>% filter(feature %in% diff_genes_cl8)
+
+# plot
+pdf("Plots/cl8_volcano_DE.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl8, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/cl8_volcano_DE_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl8, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+# Plot with selected labels
+cl8_deg <- c("IGFBP5","NBDY","CRHBP","ITGA1","IL7R","NRP2","FLT4","MAF", "PRCP","CAVIN2","LYVE1","TGFBR2", "ROBO1", "APLNR", "SQLE","UGT3A2","FOS", "NR2F2", "NEFH", "TEK","TGFBR3", # UP in KO
+             "CCL2", "CARTPT", "GJA5","GJA4","CAV1","CLDN5","PECAM1","COL1A2","KLF2","IGFBP2","HES4","CXCR4","TAGLN2","DDIT4","EMP1" # UP in WT
+             )
+# Filter them from the data frame
+cl8_deg <- DE_wilcoxauc_cl8 %>% filter(feature %in% cl8_deg)
+
+
+pdf("Plots/cl8_volcano_DE_seleceted_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl8, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_point(data =  cl8_deg, size = 2,shape = 21,fill = "#B03A2E",colour = "#B03A2E")+
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) +
+  geom_text_repel(data = cl8_deg, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 50)
+dev.off()
+
+
+png("Plots/cl8_volcano_DE_seleceted_label.png", height = 2000, width = 3000, res = 500)
+ggplot(DE_wilcoxauc_cl8, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 0.7) +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Up-regulated" & logFC > log(1.1)), size = 1,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1,shape = 21,fill = "black",colour = "black")+
+  geom_point(data =  cl8_deg, size = 1.2,shape = 21,fill = "#B03A2E",colour = "#B03A2E")+
+  theme_classic() + 
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) 
+dev.off()
+
+write.csv(DE_wilcoxauc_cl8, "Plots/DE_wilcoxauc_cl8.csv")
+
+```
+
+
+```{r wicoxon test on cluster 7}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+cl7 <- subset(seurat, idents = c(7))
+
+# Run wilcoxon test
+DE_wilcoxauc_cl7 <- wilcoxauc(cl7, group_by = "condition") %>%
+  filter(group == "KO") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_cl7 <- DE_wilcoxauc_cl7 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_cl7$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_cl7 <- setdiff(DE_wilcoxauc_cl7$feature,blacklist)
+DE_wilcoxauc_cl7 <- DE_wilcoxauc_cl7 %>% filter(feature %in% diff_genes_cl7)
+
+# plot
+pdf("Plots/cl7_volcano_DE.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl7, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl7, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl7, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_cl7, "Plots/DE_wilcoxauc_cl7.csv")
+
+```
+
+```{r wicoxon test on cluster 2}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+cl2 <- subset(seurat, idents = c(2))
+
+# Run wilcoxon test
+DE_wilcoxauc_cl2 <- wilcoxauc(cl2, group_by = "condition") %>%
+  filter(group == "KO") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_cl2 <- DE_wilcoxauc_cl2 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_cl2$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_cl2 <- setdiff(DE_wilcoxauc_cl2$feature,blacklist)
+DE_wilcoxauc_cl2 <- DE_wilcoxauc_cl2 %>% filter(feature %in% diff_genes_cl2)
+DE_wilcoxauc_cl2$padj[DE_wilcoxauc_cl2$padj == 0.000000e+00] <- min(DE_wilcoxauc_cl2$padj[which(DE_wilcoxauc_cl2$padj != 0)])
+
+# plot
+pdf("Plots/cl2_volcano_DE_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl2, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl2, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl2, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/cl2_volcano_DE_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl2, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl2, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl2, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  # geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+
+# Plot with selected labels
+cl2_deg <- c("IGFBP5", "FOS", "NR2F1", "CYP1B2", "NBDY", "CXCL14", "SOX4", "MEST", "TGFBI", "TGFBR2", # UP in KO
+             "CRHBP", "TAC1", "DLK1", "IGFBP7","ACTA2","PDGFRB", "COL18A1","HES4","TAGLN","SSL2","MYL9" # UP in WT
+             )
+# Filter them from the data frame
+cl2_deg <- DE_wilcoxauc_cl2 %>% filter(feature %in% cl2_deg)
+
+
+pdf("Plots/cl2_volcano_DE_seleceted_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl2, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl2, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl2, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_point(data =  cl2_deg, size = 2,shape = 21,fill = "#B03A2E",colour = "#B03A2E")+
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) +
+  geom_text_repel(data = cl2_deg, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 50)
+dev.off()
+
+
+png("Plots/cl2_volcano_DE_seleceted_label.png", height = 2000, width = 3000, res = 500)
+ggplot(DE_wilcoxauc_cl2, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 0.7) +
+  geom_point(data =  filter(DE_wilcoxauc_cl2, outcome == "Up-regulated" & logFC > log(1.1)), size = 1,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl2, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1,shape = 21,fill = "black",colour = "black")+
+  geom_point(data =  cl2_deg, size = 1.2,shape = 21,fill = "#B03A2E",colour = "#B03A2E")+
+  theme_classic() + 
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) 
+dev.off()
+
+write.csv(DE_wilcoxauc_cl2, "Plots/DE_wilcoxauc_cl2.csv")
+
+```
+
+```{r wicoxon test on cluster 5}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+cl5 <- subset(seurat, idents = c(5))
+
+# Run wilcoxon test
+DE_wilcoxauc_cl5 <- wilcoxauc(cl5, group_by = "condition") %>%
+  filter(group == "KO") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_cl5 <- DE_wilcoxauc_cl5 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_cl5$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_cl5 <- setdiff(DE_wilcoxauc_cl5$feature,blacklist)
+DE_wilcoxauc_cl5 <- DE_wilcoxauc_cl5 %>% filter(feature %in% diff_genes_cl5)
+
+# plot
+pdf("Plots/cl5_volcano_DE.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl5, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl5, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl5, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_cl5, "Plots/DE_wilcoxauc_cl5.csv")
+
+```
+
+
+```{r wicoxon test on clusters 0 1}
+
+Idents(seurat) <- "RNA_css_snn_res.0.4"
+cl0_1 <- subset(seurat, idents = c(0,1))
+
+# Run wilcoxon test
+DE_wilcoxauc_cl0_1 <- wilcoxauc(cl0_1, group_by = "condition") %>%
+  filter(group == "KO") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_cl0_1 <- DE_wilcoxauc_cl0_1 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_cl0_1) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_cl0_1$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_cl0_1 <- setdiff(DE_wilcoxauc_cl0_1$feature,blacklist)
+DE_wilcoxauc_cl0_1 <- DE_wilcoxauc_cl0_1 %>% filter(feature %in% diff_genes_cl0_1)
+
+# plot
+pdf("Plots/cl0_1_volcano_DE.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl0_1, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl0_1, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl0_1, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/cl0_1_volcano_DE_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl0_1, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl0_1, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl0_1, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_cl0_1, "Plots/DE_wilcoxauc_cl0_1.csv")
+
+```
+
+```{r KEGG of clusters 8 2 5 7 0_1}
+
+# Cluster 8
+DE_wilcoxauc_cl8_pos <- DE_wilcoxauc_cl8 %>% filter(outcome != "Unchanged")
+DE_wilcoxauc_cl8_pos$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=DE_wilcoxauc_cl8_pos$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+fm_path_enrich_cl8 <- compareCluster(entrez_id~outcome, data=DE_wilcoxauc_cl8_pos, fun = enrichKEGG, organism="hsa")
+pdf("Plots/KEGG_enrichment_res_cl8.pdf", width = 4, height = 5)
+enrichplot::dotplot(fm_path_enrich_cl8, showCategory = 6) +
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(fm_path_enrich_cl8@compareClusterResult, "Plots/KEGG_path_enrich_cl8.csv")
+
+
+# Cluster 2
+DE_wilcoxauc_cl2_pos <- DE_wilcoxauc_cl2 %>% filter(outcome != "Unchanged")
+DE_wilcoxauc_cl2_pos$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=DE_wilcoxauc_cl2_pos$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+fm_path_enrich_cl2 <- compareCluster(entrez_id~outcome, data=DE_wilcoxauc_cl2_pos, fun = enrichKEGG, organism="hsa")
+pdf("Plots/KEGG_enrichment_res_cl2.pdf", width = 4, height = 5)
+enrichplot::dotplot(fm_path_enrich_cl2, showCategory = 6) +
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(fm_path_enrich_cl2@compareClusterResult, "Plots/KEGG_path_enrich_cl2.csv")
+
+
+# Cluster 7
+DE_wilcoxauc_cl7_pos <- DE_wilcoxauc_cl7 %>% filter(outcome != "Unchanged")
+DE_wilcoxauc_cl7_pos$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=DE_wilcoxauc_cl7_pos$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+fm_path_enrich_cl7 <- compareCluster(entrez_id~outcome, data=DE_wilcoxauc_cl7_pos, fun = enrichKEGG, organism="hsa")
+pdf("Plots/KEGG_enrichment_res_cl7.pdf", width = 4, height = 5)
+enrichplot::dotplot(fm_path_enrich_cl7, showCategory = 6) +
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(fm_path_enrich_cl7@compareClusterResult, "Plots/KEGG_path_enrich_cl7.csv")
+
+
+# Cluster 5
+DE_wilcoxauc_cl5_pos <- DE_wilcoxauc_cl5 %>% filter(outcome != "Unchanged")
+DE_wilcoxauc_cl5_pos$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=DE_wilcoxauc_cl5_pos$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+fm_path_enrich_cl5 <- compareCluster(entrez_id~outcome, data=DE_wilcoxauc_cl5_pos, fun = enrichKEGG, organism="hsa")
+pdf("Plots/KEGG_enrichment_res_cl5.pdf", width = 4, height = 5)
+enrichplot::dotplot(fm_path_enrich_cl5, showCategory = 6) +  
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(fm_path_enrich_cl5@compareClusterResult, "Plots/KEGG_path_enrich_cl5.csv")
+
+
+# Clusters 0 and 1
+DE_wilcoxauc_cl0_1_pos <- DE_wilcoxauc_cl0_1 %>% filter(outcome != "Unchanged")
+DE_wilcoxauc_cl0_1_pos$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=DE_wilcoxauc_cl0_1_pos$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+fm_path_enrich_cl0_1 <- compareCluster(entrez_id~outcome, data=DE_wilcoxauc_cl0_1_pos, fun = enrichKEGG, organism="hsa")
+pdf("Plots/KEGG_enrichment_res_cl0_1.pdf", width = 4, height = 5)
+enrichplot::dotplot(fm_path_enrich_cl0_1, showCategory = 6) +  
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(fm_path_enrich_cl0_1@compareClusterResult, "Plots/KEGG_path_enrich_cl0_1.csv")
+
+```
+
+```{r KEGG of all clusters}
+
+seurat_de_tab <- lapply(seurat.clusters, function(cl){
+  seurat_de_tab <- wilcoxauc(cl, group_by = "condition") %>%
+    filter(group == "KO") %>%
+    mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+    mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))%>% 
+    mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated", logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated", TRUE ~ "Unchanged"))
+  blacklist <- c(grep("^MT-", seurat_de_tab$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+  diff_genes <- setdiff(seurat_de_tab$feature,blacklist)
+  seurat_de_tab <- seurat_de_tab %>% filter(feature %in% diff_genes)
+})
+
+seurat_de_tab <- seurat_de_tab[c("9", "6", "5", "4", "10", "3", "0",  "1",  "2",  "11", "7",  "8" )]
+
+
+# # Add a column with the cluster to each data frame
+# seurat_de_tab_pos <- lapply(names(seurat_de_tab), function(x) {
+#     seurat_de_tab[[x]] %>% 
+#         mutate(Cluster = x)
+# })
+
+# Add ENTREZID to each dataframe for each gene
+seurat_de_tab_entr <- lapply(seurat_de_tab, function (cl){
+  seurat_de_tab_entr <- cl %>% filter(outcome != "Unchanged")
+  seurat_de_tab_entr$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=seurat_de_tab_entr$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+  return(seurat_de_tab_entr)
+})
+
+# Extract a list of gene names of uprefgulated genes in each cluster
+seurat_de_tab_up <- lapply(seurat_de_tab_entr, function (cl){
+  seurat_de_tab_up <- cl %>% filter(outcome == "Up-regulated")
+  seurat_de_tab_up <- seurat_de_tab_up$entrez_id
+  return(seurat_de_tab_up)
+})
+
+ck <- compareCluster(geneCluster = seurat_de_tab_up, fun = enrichKEGG,)
+ck <- setReadable(ck, OrgDb = org.Hs.eg.db, keyType="ENTREZID")
+head(ck) 
+
+pdf("Plots/KEGG_enrichment_res_all.pdf", width = 8, height = 8)
+enrichplot::dotplot(ck, showCategory = 6) +  
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(ck@compareClusterResult, "Plots/KEGG_path_enrich_all_clusters.csv")
+
+```
+
+```{r feature plot known markers}
+
+markers <- c("HAND1", "TWIST1", "PITX1", "MECOM", "TFPI2", "COL6A1",
+             "PECAM1", "CLDN5", "CDH5", "KDR", "GJA5", "SOX7",
+             "DCN","PDGFRB","ACTA2","LUM","DLK1","IGFBP5",
+             "NR2F2","APLNR","EPHB4","CXCR4","GJA4","EFNB2")
+
+png("Plots/featureplots_markers.png", width = 9800, height = 6000, res = 500)
+plotMultiFeatures(Embeddings(seurat, "umap_css"),
+                  seurat@assays$RNA@data[markers,],
+                  ncol=6, colorPal=blue_colscheme, cex=0.5, par_cex = 0.8, mar = c(1,1,2,2), cex.main=1, sort_by_value=T)
+dev.off()
+
+```
+
+# Endothelial cells only
+
+#### Find EC cluster markers
+```{r EC cluster markers res.0.1}
+
+Idents(ec) <- "RNA_css_snn_res.0.1"
+
+table(ec$orig.ident, ec$RNA_css_snn_res.0.1)
+
+cl_markers_res.0.1 <- FindAllMarkers(ec, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers_res.0.1 <- cl_markers_res.0.1 %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top3_cl_markers_res.0.1 <- cl_markers_res.0.1 %>% group_by(cluster) %>%  slice_max(n = 3, order_by = avg_log2FC)
+top10_cl_markers_res.0.1 <- cl_markers_res.0.1 %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.1 <- cl_markers_res.0.1 %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.1 <- cl_markers_res.0.1 %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.1, "Plots/EC_top_cl_markers_res.0.1.csv")
+write.csv(top50_cl_markers_res.0.1, "Plots/EC_top50_cl_markers_res.0.1.csv")
+
+# top_cl_markers_unique <- top3_cl_markers_res.0.1[!duplicated(top3_cl_markers_res.0.1[ , "gene"]), ]  # Delete rows
+# top2_cl_markers_unique <- top_cl_markers_unique %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+# Remove mitochondria and ribosome genes from the list
+blacklist <- c(grep("^MT-", cl_markers_res.0.1$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(cl_markers_res.0.1$gene, blacklist)
+cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1 %>% filter(gene %in% diff_genes)
+nrow(cl_markers_res.0.4_no_MT_RP)
+
+# Redo top marker selection
+top2_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC) 
+top5_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC) 
+top10_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.1_no_MT_RP, "Plots/EC_top_cl_markers_res.0.1_no_MT_RP.csv")
+write.csv(top50_cl_markers_res.0.1_no_MT_RP, "Plots/EC_top50_cl_markers_res.0.1_no_MT_RP.csv")
+
+```
+
+#### Plot EC cluster markers
+
+```{r heatmap EC top markers by cluster res.0.1}
+
+EC_top_cl_markers_res.0.1_no_MT_RP <- read.csv("Plots/Endothelial_cells/EC_top_cl_markers_res.0.1_no_MT_RP.csv")
+EC_top2_cl_markers_res.0.1_no_MT_RP <- EC_top_cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC) 
+
+ec_levels <- c(1,0,2,3)
+
+Idents(ec) <- "RNA_css_snn_res.0.1"
+levels(ec) <- ec_levels
+ec$RNA_css_snn_res.0.1 <- factor(ec$RNA_css_snn_res.0.1, levels=ec_levels)
+
+EC_top2_cl_markers_res.0.1_no_MT_RP <- EC_top2_cl_markers_res.0.1_no_MT_RP %>% group_by(cluster)  %>% arrange(factor(cluster, levels=ec_levels))
+
+avg_cond_cl <- sapply(levels(ec$RNA_css_snn_res.0.1), function(x) rowMeans(ec@assays$RNA@data[,which(ec$RNA_css_snn_res.0.1==x)]))
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+mat_norm <- apply(avg_cond_cl[EC_top2_cl_markers_res.0.1_no_MT_RP$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- EC_top2_cl_markers_res.0.1_no_MT_RP$gene
+mat_norm <- mat_norm[,col.order]
+
+pdf("Plots/EC_heatmap_scaled_top2_markers_cl_res.0.1.pdf", width = 4, height = 9)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+```{r plot EC}
+
+avg_av_cond_cl_ec <- sapply(levels(ec$RNA_css_snn_res.0.1), function(x) rowMeans(ec@assays$RNA@data[,which(ec$RNA_css_snn_res.0.1==x)]))
+hcl_cl_ec <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl_ec[VariableFeatures(ec),])), method="ward.D2")
+cols_cl_ec <- setNames(colorRampPalette(c( "#EB6F63", "#F5B7B1","#D44637", "#B03A2E"))(length(levels(ec$RNA_css_snn_res.0.1))), levels(ec$RNA_css_snn_res.0.1)[hcl_cl_ec$order])
+
+```
+
+```{r cell proportions within EC clusters}
+
+pdf("Plots/EC_cell_prop_RNA_css_snn_res.0.1_orig.ident.pdf", width = 8, height = 7)
+df <- as.data.frame(table(ec$RNA_css_snn_res.0.1, ec$orig.ident))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.1"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+ggplot(df, aes(fill=factor(RNA_css_snn_res.0.1), y=Freq, x=orig.ident)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of endothelial cells") +
+    scale_fill_manual(values= cols_cl_ec) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+pdf("Plots/EC_cell_prop_RNA_css_snn_res.0.1_sample_timepoint.pdf", width = 8, height = 7)
+df <- as.data.frame(table(ec$RNA_css_snn_res.0.1, ec$sample_timepoint))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.1"
+colnames(df)[which(names(df) == "Var2")] <- "sample_timepoint"
+
+ggplot(df, aes(fill=factor(RNA_css_snn_res.0.1), y=Freq, x=sample_timepoint)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of endothelial cells") +
+    scale_fill_manual(values= cols_cl_ec) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+pdf("Plots/EC_cell_prop_orig.ident_RNA_css_snn_res.0.1.pdf", width = 8, height = 7)
+df <- as.data.frame(table(ec$RNA_css_snn_res.0.1, ec$orig.ident))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.1"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+ggplot(df, aes(fill=orig.ident, y=Freq, x=RNA_css_snn_res.0.1)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of endothelial cells") +
+    scale_fill_manual(values= col_sample) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+pdf("Plots/EC_cell_prop_sample_timepoint_cell_phase.pdf", width = 6, height = 7)
+df <- as.data.frame(table(ec$Phase, ec$sample_timepoint))
+colnames(df)[which(names(df) == "Var1")] <- "Phase"
+colnames(df)[which(names(df) == "Var2")] <- "sample_timepoint"
+
+ggplot(df, aes(fill=Phase, y=Freq, x=sample_timepoint)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample per timepoint") + 
+    ylab("Proportion of endothelial cells") +
+    scale_fill_manual(values= c("#bdbdbd", "#737373",  "#252525")) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+```
+
+#### Perform wilcoxon test on all EC clusters RNA_css_snn_res.0.1
+```{r wilcoxon test all EC clusters separately RNA_css_snn_res.0.1}
+
+Idents(ec) <- "RNA_css_snn_res.0.1"
+# Split ec object into a list based on the cluster in RNA_css_snn_res.0.1
+ec.clusters <- SplitObject(ec, split.by = "RNA_css_snn_res.0.1")
+
+# Generate a list of data frames with DEGs
+ec_de_tab <- lapply(ec.clusters, function(cl){
+  de_tab <- wilcoxauc(cl, group_by = "condition") %>%
+    filter(group == "KO") %>%
+    mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+    mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))%>% 
+    mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated", logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated", TRUE ~ "Unchanged"))
+  blacklist <- c(grep("^MT-", de_tab$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+  diff_genes <- setdiff(de_tab$feature,blacklist)
+  de_tab <- de_tab %>% filter(feature %in% diff_genes)
+})
+
+
+# Add number of DEGs 
+ec_no.up <- c()
+ec_no.down <- c()
+for (i in ec_de_tab) {
+  ec_no.up <- rbind(ec_no.up, sum(i$outcome == "Up-regulated"))
+  ec_no.down <- rbind(ec_no.down, sum(i$outcome ==  "Down-regulated"))
+}
+
+# Createa a table with no. DEGs
+ec_no.DEGs <- matrix(c("0","1","2","3"), ncol=1, byrow=TRUE)
+ec_no.DEGs <- as.data.frame(ec_no.DEGs)
+colnames(ec_no.DEGs) <- c("cluster")
+
+ec_no.DEGs$no.up <- ec_no.up
+ec_no.DEGs$no.down <- ec_no.down
+ec_no.DEGs$no.total <- ec_no.down + ec_no.up
+ec$RNA_css_snn_res.0.1 <- factor(ec$RNA_css_snn_res.0.1, levels=c(0,1,2,3)) # Change the order just for ease addition to the table
+ec_no.DEGs$no.cells <- as.integer(table(ec$RNA_css_snn_res.0.1))
+ec$RNA_css_snn_res.0.1 <- factor(ec$RNA_css_snn_res.0.1, levels=c(3,2,0,1))  # Return to the original order for future use
+ec_no.DEGs <- ec_no.DEGs[order(-ec_no.DEGs$no.total),] 
+ec_no.DEGs$cluster <- factor(ec_no.DEGs$cluster,levels =ec_no.DEGs$cluster)
+#1,0,2,3
+
+# Define colors
+col_order_degs_ec <- c("#B03A2E", "#D44637", "#EB6F63", "#F5B7B1") 
+
+# Plot 
+pdf("Plots/EC_lollipop_DEGs_up.pdf", height = 7, width = 5)
+ggplot(ec_no.DEGs, aes(x = cluster, y = no.up)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.up), col = col_order_degs_ec) +
+  geom_point(aes(x=cluster, y=no.up), size = 8, col = col_order_degs_ec) +
+  geom_text(aes(x=cluster,  y=no.up, label = no.up), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of up-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/EC_lollipop_DEGs_down.pdf", height = 7, width = 5)
+ggplot(ec_no.DEGs, aes(x = cluster, y = no.down)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.down), col = col_order_degs_ec) +
+  geom_point(aes(x=cluster, y=no.down), size = 8, col = col_order_degs_ec) +
+  geom_text(aes(x=cluster,  y=no.down, label = no.down), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of down-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/EC_lollipop_DEGs_total.pdf", height = 3, width = 4)
+ggplot(ec_no.DEGs, aes(x = cluster), y = no.total) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.total), col = "gray50") +
+  geom_point(aes(x=cluster, y=no.total, size = no.cells), col = col_order_degs_ec) +
+  #geom_text(aes(x=cluster,  y=no.total, label = no.total), color = "black", size = 3) +
+  theme_classic() +
+  ylim(0,1500) +
+  xlab("Cluster") + 
+  ylab("Number of DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+
+# Volcano plots
+pdf("Plots/EC_volcano_DE_KO_vs_WT_all.pdf", height = 5, width = 8) # Cluster order is 0,1,2,3
+lapply(ec_de_tab, function(cl) {ggplot(cl, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  # geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_point(colour = "grey", alpha = 0.5) +
+  geom_point(data =  filter(cl, outcome == "Up-regulated" & logFC > log(1.1)), size = 1,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(cl, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+})
+dev.off()
+
+
+write.csv(ec_de_tab, "Plots/EC_DE_wilcoxauc_all.csv") # Cluster order is 0,1,2,3
+# sapply(names(de_tab), 
+#  function (x) write.csv(de_tab[[x]], file=paste("Plots/EC_DE_wilcoxauc_",x, ".csv")))
+
+
+## Find total DEGs between ECs
+ec_de_all <- wilcoxauc(ec, group_by = "condition") %>%
+    filter(group == "KO") %>%
+    mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+    mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))%>% 
+    mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated", logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated", TRUE ~ "Unchanged"))
+blacklist <- c(grep("^MT-", ec_de_all$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(ec_de_all$feature,blacklist)
+ec_de_all <- ec_de_all %>% filter(feature %in% diff_genes)
+ec_de_all$padj[ec_de_all$padj == 0.000000e+00] <- min(ec_de_all$padj[which(ec_de_all$padj != 0)])
+
+pdf("Plots/EC_volcano_DE_KO_vs_WT.pdf", height = 5, width = 8)
+ggplot(ec_de_all, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(ec_de_all, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(ec_de_all, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+```
+
+```{r wicoxon test on EC clusters 1,0,2 RNA_css_snn_res.0.1}
+
+Idents(ec) <- "RNA_css_snn_res.0.1"
+ec_1_0_2 <- subset(ec, idents = c(1,0,2))
+Idents(ec_1_0_2) <- "condition"
+
+# Run wilcoxon test
+DE_wilcoxauc_ec_1_0_2 <- wilcoxauc(ec_1_0_2, group_by = "condition") %>%
+  filter(group == "KO") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_ec_1_0_2 <- DE_wilcoxauc_ec_1_0_2 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_ec_1_0_2) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_ec_1_0_2$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_ec_1_0_2$feature,blacklist)
+DE_wilcoxauc_ec_1_0_2 <- DE_wilcoxauc_ec_1_0_2 %>% filter(feature %in% diff_genes)
+DE_wilcoxauc_ec_1_0_2$padj[DE_wilcoxauc_ec_1_0_2$padj == 0.000000e+00] <- min(DE_wilcoxauc_ec_1_0_2$padj[which(DE_wilcoxauc_ec_1_0_2$padj != 0)])
+
+pdf("Plots/EC_volcano_DE_KO_vs_WT_cl1_0_2.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_ec_1_0_2, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_ec_1_0_2, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_ec_1_0_2, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/EC_volcano_DE_KO_vs_WT_cl1_0_2_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_ec_1_0_2, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_ec_1_0_2, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_ec_1_0_2, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  # geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_ec_1_0_2, "Plots/EC_volcano_DE_KO_vs_WT_cl1_0_2.csv") 
+
+```
+
+```{r feature plots EC}
+
+ec_markers <- c("PECAM1","CLDN5","KDR","NR2F2","MECOM","APLNR",
+                "EPHB4","GJA4","EFNB2","CXCR4", "ESM1","MYC",
+                "TAC1","MEF2C","IGF2.1","CCL2","ICAM2", # based on DE analysis - DOWN in KO
+                "CRHBP","IGFBP5","NTS","GJA1","HES4","CD44" # based on DE analysis - UP in KO
+                )
+
+png("Plots/EC_featureplots_markers.png", width = 7000, height = 4000, res = 500)
+plotMultiFeatures(Embeddings(ec, "umap_css"),
+                  ec@assays$RNA@data[ec_markers,],
+                  ncol=6, colorPal=blue_colscheme, cex=0.5, par_cex = 0.8, mar = c(1,1,2,2), cex.main=1, sort_by_value=T)
+dev.off()
+
+```
+
+
+
+# Mesoderm cells only
+
+#### Find mesoderm cluster markers
+```{r mesoderm cluster markers res.0.1}
+
+Idents(meso) <- "RNA_css_snn_res.0.1"
+
+table(meso$orig.ident, meso$RNA_css_snn_res.0.1)
+
+cl_markers_res.0.1 <- FindAllMarkers(meso, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers_res.0.1 <- cl_markers_res.0.1 %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top3_cl_markers_res.0.1 <- cl_markers_res.0.1 %>% group_by(cluster) %>%  slice_max(n = 3, order_by = avg_log2FC)
+top10_cl_markers_res.0.1 <- cl_markers_res.0.1 %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.1 <- cl_markers_res.0.1 %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.1 <- cl_markers_res.0.1 %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.1, "Plots/Meso_top_cl_markers_res.0.1.csv")
+write.csv(top50_cl_markers_res.0.1, "Plots/Meso_top50_cl_markers_res.0.1.csv")
+
+# top_cl_markers_unique <- top3_cl_markers_res.0.1[!duplicated(top3_cl_markers_res.0.1[ , "gene"]), ]  # Delete rows
+# top2_cl_markers_unique <- top_cl_markers_unique %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+# Remove mitochondria and ribosome genes from the list
+blacklist <- c(grep("^MT-", cl_markers_res.0.1$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(cl_markers_res.0.1$gene, blacklist)
+cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1 %>% filter(gene %in% diff_genes)
+nrow(cl_markers_res.0.4_no_MT_RP)
+
+# Redo top marker selection
+top2_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC) 
+top5_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC) 
+top10_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.1_no_MT_RP <- cl_markers_res.0.1_no_MT_RP %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.1_no_MT_RP, "Plots/Meso_top_cl_markers_res.0.1_no_MT_RP.csv")
+write.csv(top50_cl_markers_res.0.1_no_MT_RP, "Plots/Meso_top50_cl_markers_res.0.1_no_MT_RP.csv")
+
+```
+
+#### Plot mesoderm cluster markers
+
+```{r heatmap mesoderm top markers by cluster res.0.1}
+
+meso_top_cl_markers_res.0.1_no_MT_RP <- read.csv("Plots/Mesoderm_cells/Meso_top_cl_markers_res.0.1_no_MT_RP.csv")
+meso_top2_cl_markers_res.0.1_no_MT_RP <- meso_top_cl_markers_res.0.1_no_MT_RP %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+meso_levels <- c(4,1,0,3,2)
+
+Idents(meso) <- "RNA_css_snn_res.0.1"
+levels(meso) <- meso_levels
+meso$RNA_css_snn_res.0.1 <- factor(meso$RNA_css_snn_res.0.1, levels=meso_levels)
+
+meso_top2_cl_markers_res.0.1_no_MT_RP <- meso_top2_cl_markers_res.0.1_no_MT_RP %>% group_by(cluster)  %>% arrange(factor(cluster, levels=meso_levels))
+
+avg_cond_cl <- sapply(levels(meso$RNA_css_snn_res.0.1), function(x) rowMeans(meso@assays$RNA@data[,which(meso$RNA_css_snn_res.0.1==x)]))
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+mat_norm <- apply(avg_cond_cl[meso_top2_cl_markers_res.0.1_no_MT_RP$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- meso_top2_cl_markers_res.0.1_no_MT_RP$gene
+mat_norm <- mat_norm[,col.order]
+
+pdf("Plots/Meso_heatmap_scaled_top2_markers_cl_res.0.1.pdf", width = 5, height = 9)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+```{r plot mesoderm cells}
+
+avg_av_cond_cl_meso <- sapply(levels(meso$RNA_css_snn_res.0.1), function(x) rowMeans(meso@assays$RNA@data[,which(meso$RNA_css_snn_res.0.1==x)]))
+hcl_cl_meso <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl_meso[VariableFeatures(meso),])), method="ward.D2")
+# cols_cl_meso <- setNames(colorRampPalette(c("#0A4A3D", "#0E6B59", "#138D75", "#43A995", "#73C6B6"))(length(levels(meso$RNA_css_snn_res.0.1))), levels(meso$RNA_css_snn_res.0.1)[hcl_cl_meso$order])
+
+```
+
+
+```{r cell proportions within mesoderm clusters}
+
+pdf("Plots/Meso_cell_prop_RNA_css_snn_res.0.1_orig.ident.pdf", width = 8, height = 7)
+df <- as.data.frame(table(meso$RNA_css_snn_res.0.1, meso$orig.ident))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.1"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+ggplot(df, aes(fill=factor(RNA_css_snn_res.0.1), y=Freq, x=orig.ident)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of mesoderm cells") +
+    scale_fill_manual(values= c("#0A4A3D", "#0E6B59", "#138D75", "#43A995", "#73C6B6")) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+pdf("Plots/Meso_cell_prop_RNA_css_snn_res.0.1_sample_timepoint.pdf", width = 8, height = 7)
+df <- as.data.frame(table(meso$RNA_css_snn_res.0.1, meso$sample_timepoint))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.1"
+colnames(df)[which(names(df) == "Var2")] <- "sample_timepoint"
+
+ggplot(df, aes(fill=factor(RNA_css_snn_res.0.1), y=Freq, x=sample_timepoint)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of mesoderm cells") +
+    scale_fill_manual(values= c("#0A4A3D", "#0E6B59", "#138D75", "#43A995", "#73C6B6")) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+pdf("Plots/Meso_cell_prop_orig.ident_RNA_css_snn_res.0.1.pdf", width = 8, height = 7)
+df <- as.data.frame(table(meso$RNA_css_snn_res.0.1, meso$orig.ident))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.1"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+ggplot(df, aes(fill=orig.ident, y=Freq, x=RNA_css_snn_res.0.1)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of mesoderm cells") +
+    scale_fill_manual(values= col_sample) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+pdf("Plots/Meso_cell_prop_sample_timepoint_cell_phase.pdf", width = 6, height = 7)
+df <- as.data.frame(table(meso$Phase, meso$sample_timepoint))
+colnames(df)[which(names(df) == "Var1")] <- "Phase"
+colnames(df)[which(names(df) == "Var2")] <- "sample_timepoint"
+
+ggplot(df, aes(fill=Phase, y=Freq, x=sample_timepoint)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample per timepoint") + 
+    ylab("Proportion of mesoderm cells") +
+    scale_fill_manual(values= c("#bdbdbd", "#737373",  "#252525")) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+```
+#### Perform wicoxon test on all mesoderm clusters RNA_css_snn_res.0.1
+```{r wicoxon test all mesoderm clusters separately RNA_css_snn_res.0.1}
+
+Idents(meso) <- "RNA_css_snn_res.0.1"
+
+# Split meso object into a list based on the cluster in RNA_css_snn_res.0.1
+meso.clusters <- SplitObject(meso, split.by = "RNA_css_snn_res.0.1")
+
+# Generate a list of data frames with DEGs
+meso_de_tab <- lapply(meso.clusters, function(cl){
+  de_tab <- wilcoxauc(cl, group_by = "condition") %>%
+    filter(group == "KO") %>%
+    mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+    mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))%>% 
+    mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated", logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated", TRUE ~ "Unchanged"))
+  blacklist <- c(grep("^MT-", de_tab$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+  diff_genes <- setdiff(de_tab$feature,blacklist)
+  de_tab <- de_tab %>% filter(feature %in% diff_genes)
+})
+
+
+# Add number of DEGs 
+meso_no.up <- c()
+meso_no.down <- c()
+for (i in meso_de_tab) {
+  meso_no.up <- rbind(meso_no.up, sum(i$outcome == "Up-regulated"))
+  meso_no.down <- rbind(meso_no.down, sum(i$outcome ==  "Down-regulated"))
+}
+
+# Createa a table with no. DEGs
+meso_no.DEGs <- matrix(c("0","1","4","2","3"), ncol=1, byrow=TRUE)
+meso_no.DEGs <- as.data.frame(meso_no.DEGs)
+colnames(meso_no.DEGs) <- c("cluster")
+
+meso_no.DEGs$no.up <- meso_no.up
+meso_no.DEGs$no.down <- meso_no.down
+meso_no.DEGs$no.total <- meso_no.down + meso_no.up
+meso$RNA_css_snn_res.0.1 <- factor(meso$RNA_css_snn_res.0.1, levels=c(0,1,4,2,3)) # Change the order just for ease addition to the table
+meso_no.DEGs$no.cells <- as.integer(table(meso$RNA_css_snn_res.0.1))
+meso$RNA_css_snn_res.0.1 <- factor(meso$RNA_css_snn_res.0.1, levels=c(1,0,2,3,4))  # Return to the original order for future use
+meso_no.DEGs <- meso_no.DEGs[order(-meso_no.DEGs$no.total),]
+meso_no.DEGs$cluster <- factor(meso_no.DEGs$cluster,levels =meso_no.DEGs$cluster)
+#3,1,0,2,4
+
+# Define colors
+col_order_degs_meso <- c("#0E6B59","#73C6B6","#43A995","#138D75","#0A4A3D") #3,1,0,2,4
+
+# Plot 
+pdf("Plots/Meso_lollipop_DEGs_up.pdf", height = 7, width = 5)
+ggplot(meso_no.DEGs, aes(x = cluster, y = no.up)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.up), col = col_order_degs_meso) +
+  geom_point(aes(x=cluster, y=no.up), size = 8, col = col_order_degs_meso) +
+  geom_text(aes(x=cluster,  y=no.up, label = no.up), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of up-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/Meso_lollipop_DEGs_down.pdf", height = 7, width = 5)
+ggplot(meso_no.DEGs, aes(x = cluster, y = no.down)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.down), col = col_order_degs_meso) +
+  geom_point(aes(x=cluster, y=no.down), size = 8, col = col_order_degs_meso) +
+  geom_text(aes(x=cluster,  y=no.down, label = no.down), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of down-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/Meso_lollipop_DEGs_total.pdf", height = 3, width = 4)
+ggplot(meso_no.DEGs, aes(x = cluster), y = no.total) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.total), col = "gray50") +
+  geom_point(aes(x=cluster, y=no.total, size = no.cells), col = col_order_degs_meso) +
+  #geom_text(aes(x=cluster,  y=no.total, label = no.total), color = "black", size = 3) +
+  theme_classic() +
+  ylim(0,800) +
+  xlab("Cluster") + 
+  ylab("Number of DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+
+# Volcano plots
+pdf("Plots/Meso_volcano_DE_KO_vs_WT_all.pdf", height = 5, width = 8) # Cluster order is 0,1,4,2,3
+lapply(meso_de_tab, function(cl) {ggplot(cl, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  # geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_point(colour = "grey", alpha = 0.5) +
+  geom_point(data =  filter(cl, outcome == "Up-regulated" & logFC > log(1.1)), size = 1,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(cl, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+})
+dev.off()
+
+
+write.csv(meso_de_tab, "Plots/Meso_DE_wilcoxauc_all.csv") # Cluster order is 0,1,4,2,3
+# sapply(names(de_tab), 
+#  function (x) write.csv(de_tab[[x]], file=paste("Plots/Meso_DE_wilcoxauc_",x, ".csv")))
+
+
+## Find total DEGs between mesoderm cells
+meso_de_all <- wilcoxauc(meso, group_by = "condition") %>%
+    filter(group == "KO") %>%
+    mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+    mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))%>% 
+    mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated", logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated", TRUE ~ "Unchanged"))
+blacklist <- c(grep("^MT-", meso_de_all$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(meso_de_all$feature,blacklist)
+meso_de_all <- meso_de_all %>% filter(feature %in% diff_genes)
+meso_de_all$padj[meso_de_all$padj == 0.000000e+00] <- min(meso_de_all$padj[which(meso_de_all$padj != 0)])
+
+pdf("Plots/Meso_volcano_DE_KO_vs_WT.pdf", height = 5, width = 8)
+ggplot(meso_de_all, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(meso_de_all, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(meso_de_all, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+```
+```{r wicoxon test on mesoderm clusters 3,1,0,2 RNA_css_snn_res.0.1}
+
+Idents(meso) <- "RNA_css_snn_res.0.1"
+meso_3_1_0_2 <- subset(meso, idents = c(3,1,0,2))
+Idents(meso_3_1_0_2) <- "condition"
+
+# Run wilcoxon test
+DE_wilcoxauc_meso_3_1_0_2 <- wilcoxauc(meso_3_1_0_2, group_by = "condition") %>%
+  filter(group == "KO") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_meso_3_1_0_2 <- DE_wilcoxauc_meso_3_1_0_2 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_meso_3_1_0_2) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_meso_3_1_0_2$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_meso_3_1_0_2$feature,blacklist)
+DE_wilcoxauc_meso_3_1_0_2 <- DE_wilcoxauc_meso_3_1_0_2 %>% filter(feature %in% diff_genes)
+DE_wilcoxauc_meso_3_1_0_2$padj[DE_wilcoxauc_meso_3_1_0_2$padj == 0.000000e+00] <- min(DE_wilcoxauc_meso_3_1_0_2$padj[which(DE_wilcoxauc_meso_3_1_0_2$padj != 0)])
+
+pdf("Plots/Meso_volcano_DE_KO_vs_WT_cl3_1_0_2.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_meso_3_1_0_2, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_meso_3_1_0_2, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_meso_3_1_0_2, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/Meso_volcano_DE_KO_vs_WT_cl3_1_0_2_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_meso_3_1_0_2, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_meso_3_1_0_2, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_meso_3_1_0_2, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  # geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_meso_3_1_0_2, "Plots/Meso_volcano_DE_KO_vs_WT_cl3_1_0_2.csv") 
+
+```
+```{r feature plots mesoderm}
+
+# Markers based on Loh et al (2016) Cell
+meso_markers <- c("HAND1","FOXF1","ISL1","NKX2-5", "MEF2C", "GATA4","GATA6", # lateral/cardiac mesoderm 
+                  "TBX6","DLL3", "EVX1", "CDX2", # paraxial mesoderm (and anterior primitive streak)
+                  "MESP1","MESP2",  # mid/posterior primitive streak
+                  "GSC","EOMES", # mid/posterior primitive streak
+                  "BST2", "SST", "IGFBP3", # genes chosen from DE analysis - DOWN in KO
+                  "FN1", "SERPINE2", "NBDY","IGFBP7","TGFBI", "SOX4" # genes chosen from DE analysis - UP in KO
+                  )
+
+png("Plots/Meso_featureplots_markers.png", width = 7000, height = 4000, res = 500)
+plotMultiFeatures(Embeddings(meso, "umap_css"),
+                  meso@assays$RNA@data[meso_markers,],
+                  ncol=6, colorPal=blue_colscheme, cex=0.5, par_cex = 0.8, mar = c(1,1,2,2), cex.main=1, sort_by_value=T)
+dev.off()
+
+```
+
+# Mural cells only
+
+#### Find mural cluster markers
+```{r mural cluster markers res.0.2}
+
+Idents(mural) <- "RNA_css_snn_res.0.2"
+
+table(mural$orig.ident, mural$RNA_css_snn_res.0.2)
+
+cl_markers_res.0.2 <- FindAllMarkers(mural, min.pct = 0.25, logfc.threshold = log(1.2))
+   
+top2_cl_markers_res.0.2 <- cl_markers_res.0.2 %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top3_cl_markers_res.0.2 <- cl_markers_res.0.2 %>% group_by(cluster) %>%  slice_max(n = 3, order_by = avg_log2FC)
+top10_cl_markers_res.0.2 <- cl_markers_res.0.2 %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.2 <- cl_markers_res.0.2 %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.2 <- cl_markers_res.0.2 %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.2, "Plots/Mural_top_cl_markers_res.0.2.csv")
+write.csv(top50_cl_markers_res.0.2, "Plots/Mural_top50_cl_markers_res.0.2.csv")
+
+# top_cl_markers_unique <- top3_cl_markers_res.0.2[!duplicated(top3_cl_markers_res.0.2[ , "gene"]), ]  # Delete rows
+# top2_cl_markers_unique <- top_cl_markers_unique %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+# Remove mitochondria and ribosome genes from the list
+blacklist <- c(grep("^MT-", cl_markers_res.0.2$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(cl_markers_res.0.2$gene, blacklist)
+cl_markers_res.0.2_no_MT_RP <- cl_markers_res.0.2 %>% filter(gene %in% diff_genes)
+nrow(cl_markers_res.0.2_no_MT_RP)
+
+# Redo top marker selection
+top2_cl_markers_res.0.2_no_MT_RP <- cl_markers_res.0.2_no_MT_RP %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC) 
+top5_cl_markers_res.0.2_no_MT_RP <- cl_markers_res.0.2_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC) 
+top10_cl_markers_res.0.2_no_MT_RP <- cl_markers_res.0.2_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.2_no_MT_RP <- cl_markers_res.0.2_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.2_no_MT_RP <- cl_markers_res.0.2_no_MT_RP %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.2_no_MT_RP, "Plots/Mural_top_cl_markers_res.0.2_no_MT_RP.csv")
+write.csv(top50_cl_markers_res.0.2_no_MT_RP, "Plots/Mural_top50_cl_markers_res.0.2_no_MT_RP.csv")
+
+```
+
+#### Plot mural cluster markers
+
+```{r heatmap mural top markers by cluster res.0.2}
+
+mural_top_cl_markers_res.0.2_no_MT_RP <- read.csv("Plots/Mural_cells/Mural_top50_cl_markers_res.0.2_no_MT_RP.csv")
+mural_top2_cl_markers_res.0.2_no_MT_RP <- mural_top_cl_markers_res.0.2_no_MT_RP %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+mural_levels <- c(2,1,3,4,0)
+
+Idents(mural) <- "RNA_css_snn_res.0.1"
+levels(mural) <- mural_levels
+mural$RNA_css_snn_res.0.2 <- factor(mural$RNA_css_snn_res.0.2, levels=mural_levels)
+
+mural_top2_cl_markers_res.0.2_no_MT_RP <- mural_top2_cl_markers_res.0.2_no_MT_RP %>% group_by(cluster) %>% arrange(factor(cluster, levels=mural_levels))
+
+avg_cond_cl <- sapply(levels(mural$RNA_css_snn_res.0.2), function(x) rowMeans(mural@assays$RNA@data[,which(mural$RNA_css_snn_res.0.2==x)]))
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+mat_norm <- apply(avg_cond_cl[mural_top2_cl_markers_res.0.2_no_MT_RP$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- mural_top2_cl_markers_res.0.2_no_MT_RP$gene
+mat_norm <- mat_norm[,col.order]
+
+pdf("Plots/Mural_heatmap_scaled_top2_markers_cl_res.0.2.pdf", width = 5, height = 9)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+```{r plot mural}
+
+avg_av_cond_cl_mural <- sapply(levels(mural$RNA_css_snn_res.0.2), function(x) rowMeans(mural@assays$RNA@data[,which(mural$RNA_css_snn_res.0.2==x)]))
+hcl_cl_mural <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl_mural[VariableFeatures(mural),])), method="ward.D2")
+# cols_cl_mural <- setNames(colorRampPalette(c("#F7DC6F", "#F2CA27", "#D3AC0D", "#AB8B0A", "#876E08"))(length(levels(mural$RNA_css_snn_res.0.2))), levels(mural$RNA_css_snn_res.0.2)[hcl_cl_mural$order])
+
+```
+
+
+```{r cell proportions within mural clusters}
+
+pdf("Plots/Mural_cell_prop_RNA_css_snn_res.0.2_orig.ident.pdf", width = 8, height = 7)
+df <- as.data.frame(table(mural$RNA_css_snn_res.0.2, mural$orig.ident))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.2"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+ggplot(df, aes(fill=factor(RNA_css_snn_res.0.2), y=Freq, x=orig.ident)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of mural cells") +
+    scale_fill_manual(values= c("#F7DC6F", "#F2CA27", "#D3AC0D", "#AB8B0A", "#876E08")) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+pdf("Plots/Mural_cell_prop_RNA_css_snn_res.0.2_sample_timepoint.pdf", width = 8, height = 7)
+df <- as.data.frame(table(mural$RNA_css_snn_res.0.2, mural$sample_timepoint))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.2"
+colnames(df)[which(names(df) == "Var2")] <- "sample_timepoint"
+
+ggplot(df, aes(fill=factor(RNA_css_snn_res.0.2), y=Freq, x=sample_timepoint)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of mural cells") +
+    scale_fill_manual(values= c("#F7DC6F", "#F2CA27", "#D3AC0D", "#AB8B0A", "#876E08")) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+pdf("Plots/Mural_cell_prop_orig.ident_RNA_css_snn_res.0.2.pdf", width = 8, height = 7)
+df <- as.data.frame(table(mural$RNA_css_snn_res.0.2, mural$orig.ident))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.2"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+ggplot(df, aes(fill=orig.ident, y=Freq, x=RNA_css_snn_res.0.2)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of mural cells") +
+    scale_fill_manual(values= col_sample) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+pdf("Plots/Mural_cell_prop_sample_timepoint_cell_phase.pdf", width = 6, height = 7)
+df <- as.data.frame(table(mural$Phase, mural$sample_timepoint))
+colnames(df)[which(names(df) == "Var1")] <- "Phase"
+colnames(df)[which(names(df) == "Var2")] <- "sample_timepoint"
+
+ggplot(df, aes(fill=Phase, y=Freq, x=sample_timepoint)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample per timepoint") + 
+    ylab("Proportion of mural cells") +
+    scale_fill_manual(values= c("#bdbdbd", "#737373",  "#252525")) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+```
+
+#### Perform wilcoxon test on all mural clusters RNA_css_snn_res.0.2
+```{r wilcoxon test all mesoderm clusters separately RNA_css_snn_res.0.2}
+
+Idents(mural) <- "RNA_css_snn_res.0.2"
+# Split mural object into a list based on the cluster in RNA_css_snn_res.0.2
+mural.clusters <- SplitObject(mural, split.by = "RNA_css_snn_res.0.2")
+
+# Generate a list of data frames with DEGs
+mural_de_tab <- lapply(mural.clusters, function(cl){
+  de_tab <- wilcoxauc(cl, group_by = "condition") %>%
+    filter(group == "KO") %>%
+    mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+    mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))%>% 
+    mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated", logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated", TRUE ~ "Unchanged"))
+  blacklist <- c(grep("^MT-", de_tab$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+  diff_genes <- setdiff(de_tab$feature,blacklist)
+  de_tab <- de_tab %>% filter(feature %in% diff_genes)
+  })
+
+mural_de_tab <- lapply(mural_de_tab, function(df){
+  df$padj[df$padj == 0.000000e+00] <- min(df$padj[which(df$padj != 0)])
+  return(df)
+})
+
+
+# Add number of DEGs 
+mural_no.up <- c()
+mural_no.down <- c()
+for (i in de_tab) {
+  mural_no.up <- rbind(mural_no.up, sum(i$outcome == "Up-regulated"))
+  mural_no.down <- rbind(mural_no.down, sum(i$outcome ==  "Down-regulated"))
+}
+
+# Createa a table with no. DEGs
+mural_no.DEGs <- matrix(c("3","1","0","4","2"), ncol=1, byrow=TRUE)
+mural_no.DEGs <- as.data.frame(mural_no.DEGs)
+colnames(mural_no.DEGs) <- c("cluster")
+
+mural_no.DEGs$no.up <- mural_no.up
+mural_no.DEGs$no.down <- mural_no.down
+mural_no.DEGs$no.total <- mural_no.down + mural_no.up
+mural$RNA_css_snn_res.0.2 <- factor(mural$RNA_css_snn_res.0.2, levels=c(3,1,0,4,2)) # Change the order just for ease addition to the table
+mural_no.DEGs$no.cells <- as.integer(table(mural$RNA_css_snn_res.0.2))
+mural$RNA_css_snn_res.0.2 <- factor(mural$RNA_css_snn_res.0.2, levels=c(4,1,0,2,3))  # Return to the original order for future use
+mural_no.DEGs <- mural_no.DEGs[order(-mural_no.DEGs$no.total),]
+mural_no.DEGs$cluster <- factor(mural_no.DEGs$cluster,levels = mural_no.DEGs$cluster)
+#2,1,3,4,0
+
+# Define colors
+col_order_degs_mural <- c( "#AB8B0A", "#F2CA27", "#876E08", "#F7DC6F", "#D3AC0D") #2,1,3,4,0
+
+# Plot 
+pdf("Plots/Mural_lollipop_DEGs_up.pdf", height = 7, width = 5)
+ggplot(mural_no.DEGs, aes(x = cluster, y = no.up)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.up), col = col_order_degs_mural) +
+  geom_point(aes(x=cluster, y=no.up), size = 8, col = col_order_degs_mural) +
+  geom_text(aes(x=cluster,  y=no.up, label = no.up), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of up-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/Mural_lollipop_DEGs_down.pdf", height = 7, width = 5)
+ggplot(mural_no.DEGs, aes(x = cluster, y = no.down)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.down), col = col_order_degs_mural) +
+  geom_point(aes(x=cluster, y=no.down), size = 8, col = col_order_degs_mural) +
+  geom_text(aes(x=cluster,  y=no.down, label = no.down), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of down-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/Mural_lollipop_DEGs_total.pdf", height = 3, width = 4)
+ggplot(mural_no.DEGs, aes(x = cluster), y = no.total) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.total), col = "gray50") +
+  geom_point(aes(x=cluster, y=no.total, size = no.cells), col = col_order_degs_mural) +
+  #geom_text(aes(x=cluster,  y=no.total, label = no.total), color = "black", size = 3) +
+  theme_classic() +
+  ylim(0,750) +
+  xlab("Cluster") + 
+  ylab("Number of DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+
+# Volcano plots
+pdf("Plots/Mural_volcano_DE_KO_vs_WT_all.pdf", height = 5, width = 8) # Cluster order is 3,1,0,4,2
+lapply(mural_de_tab, function(cl) {ggplot(cl, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  # geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_point(colour = "grey", alpha = 0.5) +
+  geom_point(data =  filter(cl, outcome == "Up-regulated" & logFC > log(1.1)), size = 1,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(cl, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) 
+})
+dev.off()
+
+
+write.csv(mural_de_tab, "Plots/Mural_DE_wilcoxauc_all.csv") # Cluster order is 3,1,0,4,2
+# sapply(names(de_tab), 
+#  function (x) write.csv(de_tab[[x]], file=paste("Plots/Mural_DE_wilcoxauc_",x, ".csv")))
+
+
+
+## Find total DEGs between mural cells
+mural_de_all <- wilcoxauc(mural, group_by = "condition") %>%
+    filter(group == "KO") %>%
+    mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+    mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))%>% 
+    mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated", logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated", TRUE ~ "Unchanged"))
+blacklist <- c(grep("^MT-", mural_de_all$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(mural_de_all$feature,blacklist)
+mural_de_all <- mural_de_all %>% filter(feature %in% diff_genes)
+mural_de_all$mural_de_all[mural_de_all$padj == 0.000000e+00] <- min(mural_de_all$padj[which(mural_de_all$padj != 0)])
+
+pdf("Plots/Mural_volcano_DE_KO_vs_WT.pdf", height = 5, width = 8)
+ggplot(mural_de_all, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray",alpha = 0.5, size = 1) +
+  geom_point(data =  filter(mural_de_all, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(mural_de_all, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+```
+
+```{r wicoxon test on mural clusters 2,1,3,4 RNA_css_snn_res.0.2}
+
+Idents(mural) <- "RNA_css_snn_res.0.2"
+mural_2_1_3_4 <- subset(mural, idents = c(2,1,3,4))
+Idents(mural_2_1_3_4) <- "condition"
+
+# Run wilcoxon test
+DE_wilcoxauc_mural_2_1_3_4 <- wilcoxauc(mural_2_1_3_4, group_by = "condition") %>%
+  filter(group == "KO") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_mural_2_1_3_4 <- DE_wilcoxauc_mural_2_1_3_4 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_mural_2_1_3_4) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_mural_2_1_3_4$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_mural_2_1_3_4$feature,blacklist)
+DE_wilcoxauc_mural_2_1_3_4 <- DE_wilcoxauc_mural_2_1_3_4 %>% filter(feature %in% diff_genes)
+DE_wilcoxauc_mural_2_1_3_4$padj[DE_wilcoxauc_mural_2_1_3_4$padj == 0.000000e+00] <- min(DE_wilcoxauc_mural_2_1_3_4$padj[which(DE_wilcoxauc_mural_2_1_3_4$padj != 0)])
+
+pdf("Plots/Mural_volcano_DE_KO_vs_WT_cl2_1_3_4.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_mural_2_1_3_4, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_mural_2_1_3_4, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_mural_2_1_3_4, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/Mural_volcano_DE_KO_vs_WT_cl2_1_3_4_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_mural_2_1_3_4, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_mural_2_1_3_4, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_mural_2_1_3_4, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  # geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_mural_2_1_3_4, "Plots/Mural_volcano_DE_KO_vs_WT_cl2_1_3_4.csv") 
+
+```
+
+```{r feature plots mural}
+
+mural_markers <- c("KCNJ8","DCN","RGS5","CSPG4","ACTA2",  "LUM", # general markers
+                  "TAC1", "COL18A1", "VIM", "TPM1", "IGFBP7", "DLK1","PDGFRB","TPM2","MYL6","MEF2C", # genes chosen from DE analysis - DOWN in KO
+                  "IGFBP5", "PDGFRA", "SELENOP","NR2F1","MEIS2","SOX4","CXCL14","MEIS1" # genes chosen from DE analysis - UP in KO
+                  )
+
+png("Plots/Mural_featureplots_markers.png", width = 7000, height = 4000, res = 500)
+plotMultiFeatures(Embeddings(mural, "umap_css"),
+                  mural@assays$RNA@data[mural_markers,],
+                  ncol=6, colorPal=blue_colscheme, cex=0.5, par_cex = 0.8, mar = c(1,1,2,2), cex.main=1, sort_by_value=T)
+dev.off()
+
+```
+
+# Differential abundace with Milo
+
+## MiloR on all cells
+
+Milo is a tool for analysis of complex single cell datasets generated from replicated multi-condition experiments, which detects changes in composition between conditions. While differential abundance (DA) is commonly quantified in discrete cell clusters, Milo uses partally overlapping neighbourhoods of cells on a KNN graph. Starting from a graph that faithfully recapitulates the biology of the cell population, Milo analysis consists of 3 steps:
+
+Sampling of representative neighbourhoods
+Testing for differential abundance of conditions in all neighbourhoods
+Accounting for multiple hypothesis testing using a weighted FDR procedure that accounts for the overlap of neighbourhoods
+
+#### Prepare environment and objects
+```{r prepare the environment}
+
+# BiocManager::install("miloR")
+# citation("miloR")
+
+library(miloR)
+library(SingleCellExperiment)
+library(scater)
+library(dplyr)
+library(patchwork)
+
+```
+
+Convert the seurat object into a single cell experiemtn object. Then convert the SCE further to an extended SCE object class that can store the information about neighborhoods on the kNN graph, a Milo object.
+```{r convert Seurat object into SCE and into Milo objects}
+
+Idents(seurat) <- "condition"
+seurat_sce <- as.SingleCellExperiment(seurat)
+seurat_milo <- Milo(seurat_sce)
+
+```
+
+Generate a kNN graph.
+This is stored in the graph slot, in igraph format. The miloR package includes functionality to build and store the graph from the PCA dimensions stored in the reducedDim slot.
+```{r kNN graph construction}
+
+seurat_milo <- buildGraph(seurat_milo, k = 50, d = 30)
+
+```
+
+#### Define representative neighborhoods sl
+
+The neighborhood of a cells i defined as the group of cells connected by an edge in the kNN graph ot the index cell. 
+For efficiency, Milo doesn't test for DA in the neighborhood of every cell, but samples as indices a subset of representative cells, using a kNN sampling algorithm used by Gut et al (2015).
+```{r sampling}
+
+# For sampling you need to define a few parameters:
+# - prop: the proportion of cells to randomly sample to start with (usually 0.1 - 0.2 is sufficient)
+# - k: the k to use for KNN refinement (we recommend using the same k used for KNN graph building)
+# - d: the number of reduced dimensions to use for KNN refinement (we recommend using the same d used for KNN graph building)
+# - refined indicated whether you want to use the sampling refinement algorith, or just pick cells at random. The default and recommended way to go is to use refinement. The only situation in which you might consider using random instead, is if you have batch corrected your data with a graph based correction algorithm, such as BBKNN, but the results of DA testing will be suboptimal.
+
+seurat_milo <- makeNhoods(seurat_milo, prop = 0.1, k = 50, d=30, refined = TRUE)
+
+# Check the size of neighborhoods as this affects the power of DA testing
+plotNhoodSizeHist(seurat_milo)
+# Empirically, the authors found it’s best to have a distribution peaking between 50 and 100, or at least to have a distribution peaking above 20. 
+# Otherwise you might consider rerunning makeNhoods increasing k and/or prop.
+
+```
+
+
+Count how many cells from each sample are in each neighbourhood.
+Milo leverages the variation in cell numbers between replicates for the same experimental condition to test for differential abundance. Therefore we have to count how many cells from each sample are in each neighbourhood. We need to use the cell metadata and specify which column contains the sample information.
+
+```{r count cells in neighborhoods}
+
+seurat_milo <- countCells(seurat_milo, meta.data = data.frame(colData(seurat_milo)), sample="orig.ident")
+
+# This adds to the Milo object a 𝑛×𝑚 matrix, where 𝑛 is the number of neighbourhoods and 𝑚 is the number of experimental samples. Values indicate the number of cells from each sample counted in a neighbourhood. This count matrix will be used for DA testing.
+head(nhoodCounts(seurat_milo))
+
+```
+
+
+#### Differential abundance testing
+
+Now we are all set to test for differential abundance in neighbourhoods. We implement this hypothesis testing in a generalized linear model (GLM) framework, specifically using the Negative Binomial GLM implementation in edgeR.
+
+We first need to think about our experimental design. The design matrix should match each sample to the experimental condition of interest for DA testing.
+
+```{r define experimental design}
+
+seurat_design <- data.frame(colData(seurat_milo))[,c("orig.ident", "condition", "sample","timepoint", "replicate","KO_replicate")]
+## Convert batch info from integer to factor
+seurat_design$replicate <- as.factor(seurat_design$replicate)
+seurat_design <- distinct(seurat_design)
+rownames(seurat_design) <- seurat_design$orig.ident
+
+seurat_design
+
+```
+
+
+```{r DA testing}
+
+seurat_milo <- calcNhoodDistance(seurat_milo, d=30)
+
+seurat_design$condition <- factor(seurat_design$condition, levels = c("WT","KO"))
+da_results <- testNhoods(seurat_milo, design = ~ timepoint + condition, design.df = seurat_design)
+
+da_results %>%
+  arrange(- SpatialFDR) %>%
+  head()
+
+# Inspect the distribution of uncorrected P values, to verify that the test was balanced
+pdf("Plots/histo_da_results_miloR_timepoint_condition_k50_prop0.1.pdf", width = 10, height = 7)
+ggplot(da_results, aes(PValue)) + geom_histogram(bins=50) + theme_classic()
+dev.off()
+
+# Visualize the test results with a volcano plot (each point here represents a neighbourhood, not a cell)
+pdf("Plots/volcano_da_results_miloR_timepoint_condition_k50_prop0.1.pdf", width = 5, height = 3.5)
+ggplot(da_results, aes(logFC, -log10(SpatialFDR))) +
+  geom_point(colour = "grey", alpha = 0.5, size = 0.8) +
+  geom_point(data = filter(da_results, -log10(SpatialFDR) > 1), size = 1.2,shape = 21,fill = "black",colour = "black") + 
+  theme_classic()
+  # geom_hline(yintercept = 1) ## Mark significance threshold (10% FDR)
+dev.off()
+  
+```
+
+
+To visualize DA results relating them to the embedding of single cells, we can build an abstracted graph of neighbourhoods that we can superimpose on the single-cell embedding. Here each node represents a neighbourhood, while edges indicate how many cells two neighbourhoods have in common. Here the layout of nodes is determined by the position of the index cell in the UMAP embedding of all single-cells. The neighbourhoods displaying singificant DA are colored by their log-Fold Change.
+
+```{r visualize}
+
+seurat_milo <- buildNhoodGraph(seurat_milo, overlap = 80)
+
+## Plot neighbourhood graph
+nh_graph_pl <- plotNhoodGraphDA(seurat_milo, da_results, layout="UMAP_CSS",alpha=0.1) 
+
+da_results <- annotateNhoods(seurat_milo, da_results, coldata_col = "RNA_css_snn_res.0.4")
+head(da_results)
+
+nh_graph_pl$data <- nh_graph_pl$data %>% arrange(abs(colour_by))
+
+# While neighbourhoods tend to be homogeneous, we can define a threshold for celltype_fraction to exclude neighbourhoods that are a mix of cell types.
+ggplot(da_results, aes(RNA_css_snn_res.0.4_fraction)) + geom_histogram(bins=50)
+da_results$RNA_css_snn_res.0.4 <- ifelse(da_results$RNA_css_snn_res.0.4_fraction < 0.5, "Overlapping", da_results$RNA_css_snn_res.0.4)
+
+
+pdf("Plots/plotDAbeeswarm_miloR_timepoint_condition_k50_prop0.1.pdf", width = 4, height = 8)
+plotDAbeeswarm(da_results, group.by = "RNA_css_snn_res.0.4") + theme_classic() +scale_color_gradient2(high = c("#F9B99D","#B5202D"), low = c("#2468AD","#9EC6DF"))
+dev.off()
+
+pdf("Plots/umap_miloR_timepoint_condition_k50_prop0.1.pdf", width = 8, height = 4.5)
+nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+pdf("Plots/umap_miloR_by_neighborhood_k50_prop0.1.pdf", width = 6, height = 4.5)
+plotNhoodGraph(seurat_milo, colour_by =  "RNA_css_snn_res.0.4", layout="UMAP_CSS") 
+dev.off()
+
+png("Plots/umap_miloR_timepoint_condition_k50_prop0.1.png", width = 2700, height = 1750, res = 500)
+nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+png("Plots/umap_miloR_timepoint_condition_org_colscheme_k50_prop0.1.png", width = 2700, height = 1750, res = 500)
+nh_graph_pl + plot_layout(guides="collect") 
+dev.off()
+
+```
+
+```{r save miloR on all cells}
+
+saveRDS(seurat_milo, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/seurat_milo_k50_prop0.1.rds")
+saveRDS(da_results, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/DA_results_milo_k50_prop0.1.rds")
+write.csv(da_results,"/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/DA_results_milo_k50_prop0.1.csv")
+
+```
+
+
+
+## MiloR on endothelial cells
+
+#### Prepare environment and objects
+```{r convert Seurat EC object into SCE and into Milo objects}
+
+ec_sce <- as.SingleCellExperiment(ec)
+ec_milo <- Milo(ec_sce)
+
+```
+
+```{r kNN graph construction on ECs}
+
+ec_milo <- buildGraph(ec_milo, k = 50, d = 30)
+
+```
+
+#### Define representative neighborhoods sl
+
+```{r sampling ECs}
+
+ec_milo <- makeNhoods(ec_milo, prop = 0.1, k = 50, d=30, refined = TRUE)
+
+# Check the size of neighborhoods as this affects the power of DA testing
+plotNhoodSizeHist(ec_milo)
+# Empirically, the authors found it’s best to have a distribution peaking between 50 and 100, or at least to have a distribution peaking above 20. 
+# Otherwise you might consider rerunning makeNhoods increasing k and/or prop.
+
+```
+
+```{r count cells in EC neighborhoods}
+
+ec_milo <- countCells(ec_milo, meta.data = data.frame(colData(ec_milo)), sample="orig.ident")
+
+# This adds to the Milo object a 𝑛×𝑚 matrix, where 𝑛 is the number of neighbourhoods and 𝑚 is the number of experimental samples. Values indicate the number of cells from each sample counted in a neighbourhood. This count matrix will be used for DA testing.
+head(nhoodCounts(ec_milo))
+
+```
+
+
+#### Differential abundance testing
+
+```{r define experimental design for EC milo}
+
+ec_design <- data.frame(colData(ec_milo))[,c("orig.ident", "condition", "sample","timepoint")]
+## Convert batch info from integer to factor
+ec_design <- distinct(ec_design)
+rownames(ec_design) <- ec_design$orig.ident
+
+ec_design
+
+```
+
+`
+```{r EC DA testing}
+
+ec_milo <- calcNhoodDistance(ec_milo, d=30)
+ec_design$condition <- factor(ec_design$condition, levels = c("WT","KO"))
+ec_da_results <- testNhoods(ec_milo, design = ~ timepoint + condition, design.df = ec_design)
+
+ec_da_results %>%
+  arrange(- SpatialFDR) %>%
+  head()
+
+# Inspect the distribution of uncorrected P values, to verify that the test was balanced
+pdf("Plots/EC_histo_da_results_miloR_timepoint_condition_k50_prop0.1.pdf", width = 10, height = 7)
+ggplot(ec_da_results, aes(PValue)) + geom_histogram(bins=50) + theme_classic()
+dev.off()
+
+# Visualize the test results with a volcano plot (each point here represents a neighbourhood, not a cell)
+pdf("Plots/EC_volcano_da_results_miloR_timepoint_condition_k50_prop0.1.pdf", width = 5, height = 3.5)
+ggplot(ec_da_results, aes(logFC, -log10(SpatialFDR))) +
+  geom_point(colour = "grey", alpha = 0.5, size = 0.8) +
+  geom_point(data = filter(ec_da_results, -log10(SpatialFDR) > 1), size = 1.2,shape = 21,fill = "black",colour = "black") + 
+  theme_classic()
+  # geom_hline(yintercept = 1) ## Mark significance threshold (10% FDR)
+dev.off()
+  
+```
+
+```{r visualize EC milo}
+
+ec_milo <- buildNhoodGraph(ec_milo, overlap = 80)
+
+## Plot neighbourhood graph
+ec_nh_graph_pl <- plotNhoodGraphDA(ec_milo, ec_da_results, layout="UMAP_CSS",alpha=0.1) 
+
+ec_da_results <- annotateNhoods(ec_milo, ec_da_results, coldata_col = "RNA_css_snn_res.0.1")
+head(ec_da_results)
+
+ec_nh_graph_pl$data <- ec_nh_graph_pl$data %>% arrange(abs(colour_by))
+
+# While neighbourhoods tend to be homogeneous, we can define a threshold for celltype_fraction to exclude neighbourhoods that are a mix of cell types.
+ggplot(ec_da_results, aes(RNA_css_snn_res.0.1_fraction)) + geom_histogram(bins=50)
+ec_da_results$RNA_css_snn_res.0.1 <- ifelse(ec_da_results$RNA_css_snn_res.0.1_fraction < 0.5, "Overlapping", ec_da_results$RNA_css_snn_res.0.1)
+
+pdf("Plots/EC_plotDAbeeswarm_miloR_timepoint_condition_k50_prop0.1.pdf", width = 5, height = 5)
+plotDAbeeswarm(ec_da_results, group.by = "RNA_css_snn_res.0.1") + theme_classic() +scale_color_gradient2(high = c("#F9B99D","#B5202D"), low = c("#2468AD","#9EC6DF"))
+dev.off()
+
+pdf("Plots/EC_umap_miloR_by_neighborhood_k50_prop0.1.pdf", width = 4, height = 2.7)
+plotNhoodGraph(ec_milo, colour_by =  "RNA_css_snn_res.0.4", layout="UMAP_CSS") 
+dev.off()
+
+pdf("Plots/EC_umap_miloR_timepoint_conditionk50_prop0.1.pdf", width = 4, height = 2.7)
+ec_nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+png("Plots/EC_umap_miloR_timepoint_conditionk50_prop0.1.png", width = 2300, height = 1300, res = 500)
+ec_nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+```
+
+
+```{r save miloR on ECs}
+
+saveRDS(ec_milo, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/EC_seurat_milo_k50_prop0.1.rds")
+saveRDS(ec_da_results, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/EC_DA_results_milo_k50_prop0.1.rds")
+
+```
+
+## MiloR on mural cells
+
+#### Prepare environment and objects
+```{r convert Seurat mural object into SCE and into Milo objects}
+
+mural_sce <- as.SingleCellExperiment(mural)
+mural_milo <- Milo(mural_sce)
+
+```
+
+```{r kNN graph construction on mural cells}
+
+mural_milo <- buildGraph(mural_milo, k = 50, d = 30)
+
+```
+
+#### Define representative neighborhoods sl
+
+```{r sampling mural cells}
+
+mural_milo <- makeNhoods(mural_milo, prop = 0.1, k = 50, d=30, refined = TRUE)
+
+# Check the size of neighborhoods as this affects the power of DA testing
+plotNhoodSizeHist(mural_milo)
+# Empirically, the authors found it’s best to have a distribution peaking between 50 and 100, or at least to have a distribution peaking above 20. 
+# Otherwise you might consider rerunning makeNhoods increasing k and/or prop.
+
+```
+
+```{r count cells in mural cells neighborhoods}
+
+mural_milo <- countCells(mural_milo, meta.data = data.frame(colData(mural_milo)), sample="orig.ident")
+
+# This adds to the Milo object a 𝑛×𝑚 matrix, where 𝑛 is the number of neighbourhoods and 𝑚 is the number of experimental samples. Values indicate the number of cells from each sample counted in a neighbourhood. This count matrix will be used for DA testing.
+head(nhoodCounts(mural_milo))
+
+```
+
+
+#### Differential abundance testing
+
+```{r define experimental design for mural milo}
+
+mural_design <- data.frame(colData(mural_milo))[,c("orig.ident", "condition", "sample","timepoint")]
+## Convert batch info from integer to factor
+mural_design <- distinct(mural_design)
+rownames(mural_design) <- mural_design$orig.ident
+
+mural_design
+
+```
+
+`
+```{r mural DA testing}
+
+mural_milo <- calcNhoodDistance(mural_milo, d=30)
+mural_design$condition <- factor(mural_design$condition, levels = c("WT","KO"))
+mural_da_results <- testNhoods(mural_milo, design = ~ timepoint + condition, design.df = mural_design)
+
+mural_da_results %>%
+  arrange(- SpatialFDR) %>%
+  head()
+
+# Inspect the distribution of uncorrected P values, to verify that the test was balanced
+pdf("Plots/Mural_histo_da_results_miloR_timepoint_condition_k50_prop0.1.pdf", width = 10, height = 7)
+ggplot(mural_da_results, aes(PValue)) + geom_histogram(bins=50) + theme_classic()
+dev.off()
+
+# Visualize the test results with a volcano plot (each point here represents a neighbourhood, not a cell)
+pdf("Plots/Mural_volcano_da_results_miloR_timepoint_condition_k50_prop0.1.pdf", width = 5, height = 3.5)
+ggplot(mural_da_results, aes(logFC, -log10(SpatialFDR))) +
+  geom_point(colour = "grey", alpha = 0.5, size = 0.8) +
+  geom_point(data = filter(mural_da_results, -log10(SpatialFDR) > 1), size = 1.2,shape = 21,fill = "black",colour = "black") + 
+  theme_classic()
+  # geom_hline(yintercept = 1) ## Mark significance threshold (10% FDR)
+dev.off()
+  
+```
+
+```{r visualize mural milo}
+
+mural_milo <- buildNhoodGraph(mural_milo, overlap = 80)
+
+## Plot neighbourhood graph
+mural_nh_graph_pl <- plotNhoodGraphDA(mural_milo, mural_da_results, layout="UMAP_CSS",alpha=0.1) 
+
+mural_da_results <- annotateNhoods(mural_milo, mural_da_results, coldata_col = "RNA_css_snn_res.0.2")
+head(mural_da_results)
+
+mural_nh_graph_pl$data <- mural_nh_graph_pl$data %>% arrange(abs(colour_by))
+
+# While neighbourhoods tend to be homogeneous, we can define a threshold for celltype_fraction to exclude neighbourhoods that are a mix of cell types.
+ggplot(mural_da_results, aes(RNA_css_snn_res.0.2_fraction)) + geom_histogram(bins=50)
+mural_da_results$RNA_css_snn_res.0.2 <- ifelse(mural_da_results$RNA_css_snn_res.0.2_fraction < 0.5, "Overlapping", mural_da_results$RNA_css_snn_res.0.2)
+
+
+pdf("Plots/Mural_plotDAbeeswarm_miloR_timepoint_condition_k50_prop0.1.pdf", width = 3.5, height = 3.5)
+plotDAbeeswarm(mural_da_results, group.by = "RNA_css_snn_res.0.2") + theme_classic() +scale_color_gradient2(high = c("#F9B99D","#B5202D"), low = c("#2468AD","#9EC6DF"))
+dev.off()
+
+pdf("Plots/Mural_umap_miloR_timepoint_condition_k50_prop0.1.pdf", width = 3, height = 1.7)
+mural_nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+pdf("Plots/Mural_umap_miloR_by_neighborhood_k50_prop0.1.pdf", width = 3, height = 1.7)
+plotNhoodGraph(mural_milo, colour_by =  "RNA_css_snn_res.0.2", layout="UMAP_CSS") 
+dev.off()
+
+png("Plots/Mural_umap_miloR_timepoint_condition_k50_prop0.1.png", width = 2300, height = 1300, res = 500)
+mural_nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+png("Plots/Mural_umap_miloR_timepoint_condition_org_colscheme_k50_prop0.1.png", width = 2300, height = 1300, res = 500)
+mural_nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+```
+
+
+```{r save miloR on mural cells}
+
+saveRDS(mural_milo, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/Mural_seurat_milo_k50_prop0.1.rds")
+saveRDS(mural_da_results, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Objects/Mural_DA_results_milo_k50_prop0.1.rds")
+
+```
+
+# Compare results to CROPseq MECOM result
+
+```{r pearson correlation MECOM KO to CROPseq MECOM}
+
+DE_ct_prob <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/ms/CROPseq/CROPseq_no_I_J/res.DE-anova_perturb-prop_target_vs_dummy_ct.rds")
+
+df_DE_ct <- do.call(rbind, lapply(names(DE_ct_prob), function(ct)
+  do.call(rbind, lapply(DE_ct_prob[[ct]], function(x)
+    data.frame(celltype = ct, gene = rownames(x), x[,c(1:5,8)], padj = p.adjust(x$p_ANOVA, method="bonferroni"))))))
+rownames(df_DE_ct) <- NULL
+
+num_DEGs <- sapply(split(df_DE_ct,df_DE_ct$celltype), function(x) tapply(x$padj < 0.1, x$target, sum, na.rm=T))
+pooled_DEGs <- lapply(split(df_DE_ct,df_DE_ct$target), function(x) unique(unlist(lapply(split(x,x$celltype), function(x) x$gene[which(x$padj<0.1)]))))
+summary_DEGs_ct <- data.frame(num = lengths(pooled_DEGs),
+                              cor = sapply(names(pooled_DEGs), function(x) cor(df_DE_ct$coef[df_DE_ct$target==x & df_DE_ct$celltype=="mural" & df_DE_ct$gene %in% pooled_DEGs[[x]]],
+                                                                               df_DE_ct$coef[df_DE_ct$target==x & df_DE_ct$celltype=="endothelial" & df_DE_ct$gene %in% pooled_DEGs[[x]]], use="complete.obs")),
+                              p = sapply(names(pooled_DEGs), function(x){
+                                test = try(cor.test(df_DE_ct$coef[df_DE_ct$target==x & df_DE_ct$celltype=="mural" & df_DE_ct$gene %in% pooled_DEGs[[x]]], df_DE_ct$coef[df_DE_ct$target==x & df_DE_ct$celltype=="endothelial" & df_DE_ct$gene %in% pooled_DEGs[[x]]], use="complete.obs"))
+                                return(ifelse(sum(class(test)=="try-error")>0, 1, test$p.value))
+                              }))
+
+
+# EC
+DE_ct_prob_MECOM_EC <- df_DE_ct %>% filter(celltype == "endothelial", target == "MECOM", padj < 0.1)
+rownames(DE_ct_prob_MECOM_EC) <- DE_ct_prob_MECOM_EC$gene
+DE_ct_prob_MECOM_EC1 <- DE_ct_prob_MECOM_EC %>% select(coef)
+
+rownames(DE_wilcoxauc_cl8) <- DE_wilcoxauc_cl8$feature
+DE_wilcoxauc_cl81 <- DE_wilcoxauc_cl8 %>% filter(padj < 0.05) %>% select(logFC)
+
+genes2cor_EC <- intersect(rownames(DE_wilcoxauc_cl81), rownames(DE_ct_prob_MECOM_EC1))
+DE_ct_prob_MECOM_EC1 <- DE_ct_prob_MECOM_EC1 %>% filter(rownames(DE_ct_prob_MECOM_EC1) %in% genes2cor_EC)
+DE_wilcoxauc_cl81 <- DE_wilcoxauc_cl81 %>% filter(rownames(DE_wilcoxauc_cl81) %in% genes2cor_EC)
+
+df <- DE_ct_prob_MECOM_EC1 %>% mutate(DE_wilcoxauc_cl81)
+# Check the distribution
+hist(df$logFC, breaks = 100)
+hist(df$coef, breaks = 100)
+
+# Calcualte the correlation with Spearman
+corr2ref_cl <- cor(DE_ct_prob_MECOM_EC1, DE_wilcoxauc_cl81, method="pearson")
+# 0.7804679
+
+# Plot as a scatterplot
+df$feature <- rownames(df) 
+
+genes <- c("IGFBP5","NRP2","CRHBP","CAVIN2","TIMP3","GJA5","TAGLN2","EMP1","SQLE")
+genes <- df %>% filter(feature %in% genes)
+
+pdf("Plots/MECOM_DE_CROPseq_coef_vs_KO_logFC_endothelial_cells.pdf", height = 4, width = 4)
+ggplot(df, aes(x = logFC, y = coef, label = feature)) +
+  geom_point(colour = "black", fill= "black", alpha = 0.5, size = 1) +
+  geom_point(data = genes, size = 1.5,shape = 21,fill = "#B03A2E", colour = "#B03A2E") +
+  theme_classic() + 
+  geom_vline(xintercept = 0,  linetype="dotted") +
+  geom_hline(yintercept = 0,  linetype="dotted") +
+  geom_text_repel(data = genes, mapping = aes(logFC, coef, label = feature), size = 3, max.overlaps = 50) +
+  xlab(expression("log"[2]*"FC of DEGs in MECOM KO vs WT in endothelial cells")) + 
+  ylab(expression("ANOVA coefficient of DEGs in MECOM gRNA cells vs CTRL in cluster 8"))
+dev.off()
+
+
+
+# Mural
+DE_ct_prob_MECOM_mural <- df_DE_ct %>% filter(celltype == "mural", target == "MECOM", padj < 0.1)
+rownames(DE_ct_prob_MECOM_mural) <- DE_ct_prob_MECOM_mural$gene
+DE_ct_prob_MECOM_mural1 <- DE_ct_prob_MECOM_mural %>% select(coef)
+
+rownames(DE_wilcoxauc_cl2) <- DE_wilcoxauc_cl2$feature
+DE_wilcoxauc_cl21 <- DE_wilcoxauc_cl2 %>% filter(padj < 0.05) %>% select(logFC)
+
+genes2cor_mural <- intersect(rownames(DE_wilcoxauc_cl21), rownames(DE_ct_prob_MECOM_mural1))
+DE_ct_prob_MECOM_mural1 <- DE_ct_prob_MECOM_mural1 %>% filter(rownames(DE_ct_prob_MECOM_mural1) %in% genes2cor_mural)
+DE_wilcoxauc_cl21 <- DE_wilcoxauc_cl21 %>% filter(rownames(DE_wilcoxauc_cl21) %in% genes2cor_mural)
+
+
+df <- DE_ct_prob_MECOM_mural1 %>% mutate(DE_wilcoxauc_cl21)
+# Check the distribution
+hist(df$logFC, breaks = 100)
+hist(df$coef, breaks = 100)
+
+# Calcualte the correlation with Pearson
+corr2ref_cl <- cor(DE_ct_prob_MECOM_mural1, DE_wilcoxauc_cl21, method="pearson")
+# 0.9098838
+
+# Plot as a scatterplot
+df$feature <- rownames(df) 
+
+genes <- c("MECOM","PBX3","GOLM1","MAN1A1", "PTN")
+genes <- df %>% filter(feature %in% genes)
+
+pdf("Plots/MECOM_DE_CROPseq_coef_vs_KO_logFC_mural.pdf", height = 4, width = 4)
+ggplot(df, aes(x = logFC, y = coef, label = feature)) +
+  geom_point(colour = "black", fill= "black", alpha = 0.5, size = 1) +
+  geom_point(data = genes, size = 1.5,shape = 21,fill = "#B03A2E", colour = "#B03A2E") +
+  theme_classic() + 
+  geom_vline(xintercept = 0,  linetype="dotted") +
+  geom_hline(yintercept = 0,  linetype="dotted") +
+  geom_text_repel(data = genes, mapping = aes(logFC, coef, label = feature), size = 3, max.overlaps = 50) +
+  xlab(expression("log"[2]*"FC of DEGs in MECOM KO vs WT in mural cells")) + 
+  ylab(expression("ANOVA coefficient of DEGs in MECOM gRNA cells vs CTRL in cluster 2"))
+dev.off()
+
+```
+
+# Arteriovenous score of ECs
+
+```{r compare to primary endothelial cells in guttube}
+
+seurat_fetal_endo <- readRDS("/links/groups/treutlein/USERS/zhisong_he/Work/intestine_organoids/fetal_atlas_endothelial.seurat.rds")
+seurat_fetal_endo <- subset(seurat_fetal_endo, cells = colnames(seurat_fetal_endo)[which(!seurat_fetal_endo$celltype %in% c("COL1A2+","Lymphatic EC"))]) %>% FindVariableFeatures(nfeatures = 3000)
+ref_fetal_endo_ct <- sapply(levels(droplevels(seurat_fetal_endo$celltype)), function(ct) rowMeans(seurat_fetal_endo@assays$RNA@data[setdiff(VariableFeatures(seurat_fetal_endo),blacklist),which(seurat_fetal_endo$celltype == ct)]))
+avg_expr_fetal_endo <- sapply(levels(droplevels(seurat_fetal_endo$celltype)), function(ct) rowMeans(seurat_fetal_endo@assays$RNA@data[,which(seurat_fetal_endo$celltype == ct)]))
+
+```
+
+```{r A-V score}
+
+DE_fetal_av <- wilcoxauc(seurat_fetal_endo, "celltype", groups_use=c("Arterial EC","Venous EC"))
+DEG_fetal_av <- lapply(split(DE_fetal_av, DE_fetal_av$group), function(x){
+  x <- x[which(x$padj < 0.01 & x$logFC > log(1.2) & x$auc > 0.7 & x$pct_in > 20 & x$pct_out < 20 & x$pct_in - x$pct_out > 20),]
+  x <- x[order(x$auc,decreasing=T),]
+  x <- x[which(!x$feature %in% blacklist),]
+  return(x)
+})
+ec <- AddModuleScore(ec, features = list(DEG_fetal_av[['Arterial EC']]$feature), name="arterial")
+ec <- AddModuleScore(ec, features = list(DEG_fetal_av[['Venous EC']]$feature), name="venous")
+ec$arterial_venous <- ec$arterial1 - ec$venous1
+FeaturePlot(ec, c("arterial1","venous1","arterial_venous"), reduction="umap_css", cols=pinknogray_colscheme(30)) & NoAxes() & NoLegend()
+png("Plots/plot.umap_css_av_specificity_art_minus_ven.png", height=6, width=8, unit="cm", res=500)
+par(mar=c(1,1,1,1), cex=0.5)
+plotFeature(Embeddings(ec, "umap_css"), sign(ec$arterial_venous)*sqrt(abs(ec$arterial_venous)), cex=0.9, colorPal=bluered_colscheme, pt_border=T, lwd_border=0.1)
+dev.off()
+png("Plots/plot.umap_css_av_scores.png", height=6, width=16, unit="cm", res=500)
+layout(matrix(1:2,nrow=1)); par(mar=c(1,1,1,1), cex=0.5)
+plotFeature(Embeddings(ec, "umap_css"), ec$arterial1, cex=0.9, colorPal=rev(purplegreen_colscheme(30)), pt_border=T, lwd_border=0.1)
+plotFeature(Embeddings(ec, "umap_css"), ec$venous1, cex=0.9, colorPal=rev(purplegreen_colscheme(30)), pt_border=T, lwd_border=0.1)
+dev.off()
+
+```
+
+# Pathway analysis PORGEN y on all cells
+```{r pathway analysis PROGENy}
+
+library(decoupleR)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+library(rcartocolor)
+
+net <- get_progeny(organism = 'human', top = 100)
+net
+
+# Extract the normalized log-transformed counts
+mat_seurat <- as.matrix(seurat@assays$RNA@data)
+
+# Run wmean
+acts <- run_wmean(mat=mat_seurat, net=net, .source='source', .target='target',
+                  .mor='weight', times = 100, minsize = 5)
+acts
+
+# Extract norm_wmean and store it in pathwayswmean in data
+seurat[['pathwayswmean']] <- acts %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+
+# Change assay
+DefaultAssay(object = seurat) <- "pathwayswmean"
+seurat$cluster_condition <- paste0(seurat$RNA_css_snn_res.0.4, "_", seurat$condition)
+Idents(seurat) <- "cluster_condition"
+
+# Scale the data
+seurat <- ScaleData(seurat)
+seurat@assays$pathwayswmean@data <- seurat@assays$pathwayswmean@scale.data
+
+p1 <- DimPlot(seurat, reduction = "umap", label = TRUE, pt.size = 0.5) + 
+  NoLegend() + ggtitle('Cell types')
+p2 <- (FeaturePlot(seurat, features = c("Trail")) & 
+  scale_colour_gradient2(low = 'blue', mid = 'white', high = 'red')) +
+  ggtitle('Trail activity')
+p1 | p2
+
+# Extract activities from object as a long dataframe
+df_seurat <- t(as.matrix(seurat@assays$pathwayswmean@data)) %>%
+  as.data.frame() %>%
+  mutate(cluster = Idents(seurat)) %>%
+  pivot_longer(cols = -cluster, names_to = "source", values_to = "score") %>%
+  group_by(cluster, source) %>%
+  summarise(mean = mean(score))
+
+# Transform to wide matrix
+top_acts_mat_seurat <- df_seurat %>%
+  pivot_wider(id_cols = 'cluster', names_from = 'source',
+              values_from = 'mean') %>%
+  column_to_rownames('cluster') %>%
+  as.matrix()
+
+# Choose color palette
+palette_length = 100
+my_color = colorRampPalette(c("#710085", "#E0E2DD","#006b02"))(palette_length)
+
+my_breaks <- c(seq(-2, 0, length.out=ceiling(palette_length/2) + 1),
+               seq(0.05, 2, length.out=floor(palette_length/2)))
+
+# Plot
+pdf("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/MECOM_KO/MECOM_KO_day7_day21_together/Plots/pathway_score_progeny.pdf")
+pheatmap(top_acts_mat_seurat, border_color = NA, color=my_color, breaks = my_breaks, scale = "column")
+dev.off()
+
+```

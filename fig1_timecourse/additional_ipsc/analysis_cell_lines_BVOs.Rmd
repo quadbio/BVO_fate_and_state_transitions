@@ -1,0 +1,360 @@
+---
+title: "Cell line comparison analysis - BVO differentiation"
+author: "Marina Nikolova"
+date: "2023-09-12"
+output: html_document
+---
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+library(uwot)
+library(gplots)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+cell_type_cols <- c(c("#1F618D","#2874A6"),                                # PSC colors
+                        colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(5), # mesoderm colors
+                        colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4), # mural colors
+                        colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(7), # endothelial colors
+                        c("#BFC9CA","#566573","#273746"))
+
+line_cols <- c("#AF526D", "#CFA630","#A3B521","#3392B5") # 409b2, H9, memRFP WTC, NC8
+sample_cols <- c("#E8A447","#DA6C36","#CA4442") # day 7, 14 and 21 based on the Fig.1 colors
+
+```
+
+```{r load seurat object}
+
+seurat <- readRDS("~/BVO_diff_cell_lines.rds")
+
+```
+
+```{r basic plots}
+
+# sample_line
+sample_line_levels <- c("D7_409b2", "D7_H9","D7_memRFP_WTC","D7_NC8", "D14_409b2", "D14_H9", "D14_memRFP_WTC", "D14_NC8", "D21_409b2", "D21_H9","D21_memRFP_WTC","D21_NC8")
+seurat$sample_line <- factor(seurat$sample_line, levels = sample_line_levels)
+
+  plotFeature(Embeddings(seurat,"umap_css"), seurat$sample_line, cex=0.9, pt_border=T, lwd_border = 0.1, do_label=F, label_round=T, cex.label=2)
+  DimPlot(seurat, group.by = "sample_line", reduction = "umap_css", pt.size = 0.4) & NoAxes()
+
+# sample
+sample_levels <- c("D7", "D14", "D21")
+seurat$sample <- factor(seurat$sample, levels = sample_levels)
+  plotFeature(Embeddings(seurat,"umap_css"), seurat$sample, cex=0.9, pt_border=T, lwd_border = 0.1, do_label=F, label_round=T, cex.label=2, colorPal = sample_cols)
+  DimPlot(seurat, group.by ="sample", reduction ="umap_css", pt.size = 0.4, cols = sample_cols) & NoAxes()
+
+# line
+line_levels <- c("409b2", "H9", "memRFP_WTC", "NC8")
+seurat$line <- factor(seurat$line, levels = line_levels)
+  plotFeature(Embeddings(seurat,"umap_css"), seurat$line, cex=0.9, pt_border=T, lwd_border = 0.1, do_label=F, label_round=T, cex.label=2, colorPal = line_cols)
+  DimPlot(seurat, group.by = "line", reduction = "umap_css", pt.size = 0.4, cols = line_cols) & NoAxes()
+
+# cell cycle seurat
+  plotFeature(Embeddings(seurat, "umap_css"), seurat$Phase, colorPal=c(G1="#cdcdcd",S="#909090",G2M="#303030"), do_legend = T, legend_pos = "topleft", cex=0.9, pt_border = T, lwd_border = 0.1)
+
+```
+
+#### Clustering
+```{r find cluster markers}
+
+# Change default identity to Seurat clusters
+Idents(seurat) <- "RNA_snn_res.0.3"
+
+# Find cluster markers
+cl_markers <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+# Extract several tables with different number of top cluster markers
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+top_cl_markers_unique <- top10_cl_markers[!duplicated(top10_cl_markers[ , "gene"]), ]  # Delete rows
+top2_cl_markers_unique <- top_cl_markers_unique %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+# Save tables
+write.csv(top_cl_markers, "Plots/top_cl_markers.csv")
+write.csv(top50_cl_markers, "Plots/top50_cl_markers.csv")
+
+```
+
+```{r organise clusters and plot}
+
+# Define colors for each cluster based on the colors in the ms
+col_cl <- setNames(c(colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(4), # mesoderm colors 7, 3, 6, 9
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4), # mural colors 0, 1, 5, 2
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(3) # endothelial colors 8, 10, 4
+                     ),                  
+                   c(7, 3, 9, 6,         # mesoderm clusters
+                     2, 5, 1, 0,          # mural cell clusters
+                     8, 10, 4   # endothelial cell clusters
+                     ))          # other clusters
+
+# Plot
+DimPlot(seurat, group.by = "RNA_snn_res.0.3", reduction = "umap_css", pt.size = 0.4, cols = col_cl) & NoAxes()
+
+# Final clustering plots
+  plotFeature(Embeddings(seurat,"umap_css"), seurat$RNA_snn_res.0.3, cex=0.9, pt_border=T, lwd_border = 0.1, do_label=F, label_round=T, cex.label=2, colorPal = col_cl)
+  DimPlot(seurat, group.by ="RNA_snn_res.0.3", reduction ="umap_css", pt.size = 0.4, cols = col_cl) & NoAxes()
+
+```
+
+```{r cell number per line in cluster and per cell cycle phase}
+
+# Define cluster levels
+cl_levels <- c(7, 3, 9, 6,         # mesoderm clusters
+                     2, 5, 1, 0,          # mural cell clusters
+                     8, 10, 4   # endothelial cell clusters
+                     )
+
+# Make sure default identty of the object are the clusters
+Idents(seurat) <- "RNA_snn_res.0.3"
+levels(seurat) <- cl_levels
+
+# Create a dataset for line in cluster
+cells_cluster_line <- as.data.frame(table(seurat$RNA_snn_res.0.3, seurat$line))
+  colnames(cells_cluster_line)[which(names(cells_cluster_line) == "Var1")] <- "Cluster"
+  colnames(cells_cluster_line)[which(names(cells_cluster_line) == "Var2")] <- "Line"
+# Stacked plot of line and cluster
+  ggplot(cells_cluster_line, aes(fill=Line, y=Freq, x=factor(Cluster, levels = cl_levels))) +
+      geom_bar( stat="identity") +
+      ggplot2::theme_classic() +
+      xlab("Cluster") +
+      ylab("Cell line") +
+      scale_fill_manual(values = line_cols) +
+     theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+
+# Create a dataset for cell cycle phase in cluster
+seurat$Phase <- factor(seurat$Phase, levels = factor(c("G1", "S", "G2M")))
+cells_cluster_phase <- as.data.frame(table(seurat$RNA_snn_res.0.3, seurat$Phase))
+  colnames(cells_cluster_phase)[which(names(cells_cluster_phase) == "Var1")] <- "Cluster"
+  colnames(cells_cluster_phase)[which(names(cells_cluster_phase) == "Var2")] <- "Phase"
+# Stacked plot of cycle phase and cluster
+  ggplot(cells_cluster_phase, aes(fill=Phase, y=Freq, x=factor(Cluster, levels = cl_levels))) +
+      geom_bar( stat="identity", position = "fill") +
+      ggplot2::theme_classic() +
+      xlab("Cluster") +
+      ylab("Cell cycle phase") +
+      scale_fill_manual(values = c(G1="#cdcdcd",S="#909090",G2M="#303030")) +
+     theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+
+# Create a dataset for cell cycle phase and time point + line
+seurat$Phase <- factor(seurat$Phase, levels = factor(c("G1", "S", "G2M")))
+cells_cluster_phase <- as.data.frame(table(seurat$sample_line, seurat$Phase))
+  colnames(cells_cluster_phase)[which(names(cells_cluster_phase) == "Var1")] <- "sample_line"
+  colnames(cells_cluster_phase)[which(names(cells_cluster_phase) == "Var2")] <- "Phase"
+# Stacked plot of cycle phase and time point + line
+  ggplot(cells_cluster_phase, aes(fill=Phase, y=Freq, x=sample_line)) +
+      geom_bar( stat="identity", position = "fill") +
+      ggplot2::theme_classic() +
+      xlab("Cluster") +
+      ylab("Cell cycle phase") +
+      scale_fill_manual(values = c(G1="#cdcdcd",S="#909090",G2M="#303030")) +
+     theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+
+# Create a dataset for time point in cluster
+cells_cluster_timepoint <- as.data.frame(table(seurat$RNA_snn_res.0.3, seurat$sample))
+  colnames(cells_cluster_timepoint)[which(names(cells_cluster_timepoint) == "Var1")] <- "Cluster"
+  colnames(cells_cluster_timepoint)[which(names(cells_cluster_timepoint) == "Var2")] <- "Timepoint"
+# Stacked plot for time point in cluster
+  ggplot(cells_cluster_timepoint, aes(fill=Timepoint, y=Freq, x=factor(Cluster, levels = cl_levels))) +
+      geom_bar( stat="identity", position = "fill") +
+      ggplot2::theme_classic() +
+      xlab("Cluster") +
+      ylab("Cell number") +
+      scale_fill_manual(values = sample_cols) +
+     theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+
+# Create a dataset for time point in cluster
+cells_line_timepoint <- as.data.frame(table(seurat$line, seurat$sample))
+  colnames(cells_line_timepoint)[which(names(cells_line_timepoint) == "Var1")] <- "Line"
+  colnames(cells_line_timepoint)[which(names(cells_line_timepoint) == "Var2")] <- "Timepoint"
+# Stacked plot for time point in cluster
+  ggplot(cells_line_timepoint, aes(fill=Line, y=Freq, x=factor(Timepoint, levels = sample_levels))) +
+      geom_bar( stat="identity") +
+      ggplot2::theme_classic() +
+      xlab("Timepoint") +
+      ylab("Cell number") +
+      scale_fill_manual(values = line_cols) +
+     theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+
+```
+
+
+#### Plot cluster markers
+```{r heatmap top markers by cluster}
+
+cluster_levels <- c(7, 3, 9, 6,         # mesoderm clusters
+                     2, 5, 1, 0,          # mural cell clusters
+                     8, 10, 4   # endothelial cell clusters
+                     )
+seurat$RNA_snn_res.0.3 <- factor(seurat$RNA_snn_res.0.3, levels = cluster_levels)
+
+library(gplots)
+avg_exp_cl <- sapply(levels(seurat$RNA_snn_res.0.3), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_snn_res.0.3==x)]))
+# scale the data as 0 to 1 (instead)
+
+# top 2 markers
+genes <- top2_cl_markers_unique %>% arrange(factor(cluster, levels = cluster_levels)) %>% pull(gene)
+# $gene
+  mat_norm <- apply(avg_exp_cl[genes,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+  mat_norm <- mat_norm[,genes]
+
+    heatmap.2(t(mat_norm), Colv = NA ,Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col = colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+
+```
+
+```{r plot vasculature markers}
+
+# Select marker genes 
+markers <- c("CLDN5", "CDH5","MECOM", "PECAM1","KDR", "GJA4","CXCR4", "APLNR", "NR2F2","VWF","MFSD2A","SLC16A1","PLVAP","ESM1","HEY1", "IGFBP3","CSPG4","PDGFRB","KCNJ8", "ANPEP", "MCAM", "ACTA2","TAGLN","DCN", "DLK1","LUM","PAX8","PAX6","MKI67","COL1A1")
+
+# Plot marker genes 
+  plotMultiFeatures(Embeddings(seurat, "umap_css"),
+                    seurat@assays$RNA@data[markers,],
+                    ncol=6, colorPal=blue_colscheme, cex=0.3, par_cex = 0.8, mar = c(1,1,2,2), cex.main=2, sort_by_value=T, random_order = F)
+
+```
+
+#### Group by cluster and sample identity
+```{r add sample and cluster identity to metadata}
+
+# Add metadata with line and cluster information
+seurat$cluster_line <- paste0(seurat$RNA_snn_res.0.3, "_", seurat$line)
+cluster_line_levels <- c(unique(paste0(seurat$RNA_snn_res.0.3, "_", seurat$line)))
+cluster_line_levels <- c("7_409b2", "7_H9", "7_memRFP_WTC", "7_NC8", 
+                         "3_409b2", "3_H9", "3_memRFP_WTC", "3_NC8", 
+                         "9_409b2", "9_H9", "9_memRFP_WTC",  "9_NC8", 
+                         "6_409b2", "6_H9", "6_memRFP_WTC", "6_NC8", 
+                         "2_409b2", "2_H9", "2_memRFP_WTC", "2_NC8",
+                          "5_409b2" , "5_H9", "5_memRFP_WTC", "5_NC8",
+                          "1_409b2", "1_H9", "1_memRFP_WTC", "1_NC8",
+                         "0_409b2", "0_H9", "0_memRFP_WTC",  "0_NC8", 
+                         "8_409b2", "8_H9", "8_memRFP_WTC", "8_NC8",
+                         "4_409b2", "4_H9", "4_memRFP_WTC", "4_NC8",         
+                         "10_409b2", "10_H9", "10_memRFP_WTC", "10_NC8"                               
+                                        )
+# substr(cluster_line_levels,1,1)
+
+## Cluster markers and which cell type markers to add to them
+# "GJA4"     "CLDN5"    # 10 add "CDH5", "PECAM1"
+# "FAM107B"  "VAMP5"    # 4 add "KDR", "VWF"
+# "GNG11"    "EGFL7"    # 8 add "GJA4","CXCR4", "APLNR", "NR2F2"
+# "IGFBP5"   "NEFM"     # 0 add "HAND1", "MEIS2"
+# "TFPI2"    "CHODL"    # 1 add "ACTA2", "TPM1"
+# "LUM"     "DLK1"      # 5 add "DCN", "COL1A1"
+# "MCAM"     "REN"      # 2 add "COL5A1", "PDGFRB","CSPG4", KCNJ8"
+# "HMGA1"    "KRT19"    # 6  
+# "PTTG1"    "NUSAP1"   # 9 
+# "CRHBP"    "SST"      # 3 add "IGFBP3", "VCAN"
+# "TOP2A"    "HIST1H4C" # 7 
+
+cluster_markers_plus <- c("GJA4", "CLDN5", "CDH5", "PECAM1", # 10
+                        "FAM107B", "VAMP5", "KDR", "VWF",    # 4  
+                        "GNG11", "EGFL7", "GJA4","CXCR4", "APLNR", "NR2F2",    # 8  
+                        "IGFBP5", "NEFM", "HAND1", "MEIS2",     # 0  
+                        "TFPI2", "CHODL", "ACTA2", "TPM1",    # 1  
+                        "LUM", "DLK1", "DCN", "COL1A1",      # 5  
+                        "MCAM", "REN", "COL5A1", "PDGFRB",  "CSPG4", "KCNJ8",     # 2 
+                        "HMGA1", "KRT19",    # 6 
+                        "PTTG1", "NUSAP1",   # 9 
+                        "CRHBP", "SST", "IGFBP3", "VCAN",      # 3  
+                        "TOP2A", "HIST1H4C" # 7 
+                          )
+seurat$cluster_line <- factor(seurat$cluster_line, levels = cluster_line_levels)
+
+Idents(seurat) <- "cluster_line"
+
+# Save dotplot with markers
+  DotPlot(seurat, features = unique(cluster_markers_plus), cols = c("#EDEDED", "#191919")) + RotatedAxis()  + coord_flip()
+
+```
+
+```{r plot cell lines per cluster}
+
+# Create a dataset for line in cluster
+cells_cluster_line <- as.data.frame(table(seurat$RNA_snn_res.0.3, seurat$line))
+  colnames(cells_cluster_line)[which(names(cells_cluster_line) == "Var1")] <- "Cluster"
+  colnames(cells_cluster_line)[which(names(cells_cluster_line) == "Var2")] <- "Line"
+
+# Manually compute counts and percentages
+cells_cluster_line <- cells_cluster_line %>% 
+  group_by(Cluster) %>% 
+  mutate(pct = Freq / sum(Freq)) 
+
+# Stacked plot of line and cluster
+  ggplot(cells_cluster_line, aes(fill=Line, y=pct, x=factor(Cluster, levels = cl_levels))) +
+      geom_bar( stat="identity", position = "dodge") +
+      ggplot2::theme_classic() +
+      xlab("Cluster") +
+      ylab("Proportion of cells") +
+      scale_fill_manual(values = line_cols) +
+     theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+
+
+# Create color palette for line and time point
+sample_line_cols <- c("#a36d7d" ,"#c2ac6d", "#acb85c", "#6899ab", 
+                      "#AF526D", "#CFA630", "#A3B521",  "#3392B5", 
+                      "#b5214c", "#a67a00", "#728200","#096182"
+                        )
+
+# Create a dataset for line and time point in cluster
+cells_cluster_sample_line <- as.data.frame(table(seurat$RNA_snn_res.0.3, seurat$sample_line, seurat$line))
+  colnames(cells_cluster_sample_line)[which(names(cells_cluster_sample_line) == "Var1")] <- "Cluster"
+  colnames(cells_cluster_sample_line)[which(names(cells_cluster_sample_line) == "Var2")] <- "Sample_line"
+  colnames(cells_cluster_sample_line)[which(names(cells_cluster_sample_line) == "Var3")] <- "Line"
+
+# Manually compute counts and percentages
+cells_cluster_sample_line <- cells_cluster_sample_line %>% 
+  group_by(Cluster) %>% 
+  mutate(pct = Freq / sum(Freq)) 
+
+# Plot line and time point in cluster
+  ggplot(cells_cluster_sample_line, aes(x = Line, y = pct, fill = Sample_line)) +
+    theme_classic() +
+    geom_histogram(stat = "identity", position = "stack") +
+    facet_wrap(~ Cluster, ncol = 11) +
+    scale_fill_manual(values = sample_line_cols) +
+    theme(panel.margin = grid::unit(0, "lines")) +
+    RotatedAxis()
+
+```
+
+```{r plot cell lines per cell cycle}
+
+# Create a dataset for line and time point in cluster
+cells_cluster_line_phase <- as.data.frame(table(seurat$RNA_snn_res.0.3, seurat$Phase, seurat$line))
+  colnames(cells_cluster_line_phase)[which(names(cells_cluster_line_phase) == "Var1")] <- "Cluster"
+  colnames(cells_cluster_line_phase)[which(names(cells_cluster_line_phase) == "Var2")] <- "Phase"
+  colnames(cells_cluster_line_phase)[which(names(cells_cluster_line_phase) == "Var3")] <- "Line"
+
+# Manually compute counts and percentages
+cells_cluster_line_phase <- cells_cluster_line_phase %>% 
+  group_by(Cluster) %>% 
+  mutate(pct = Freq / sum(Freq)) 
+
+# Plot line and time point in cluster
+  ggplot(cells_cluster_line_phase, aes(x = Line, y = pct, fill = Phase)) +
+    theme_classic() +
+    geom_histogram(stat = "identity", position = "fill") +
+    facet_wrap(~ Cluster, ncol = 11) +
+    scale_fill_manual(values = c(G1="#cdcdcd",S="#909090",G2M="#303030")) +
+    theme(panel.margin = grid::unit(0, "lines")) +
+    RotatedAxis()
+
+```

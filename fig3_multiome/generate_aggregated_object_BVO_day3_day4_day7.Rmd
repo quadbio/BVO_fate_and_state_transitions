@@ -1,0 +1,113 @@
+---
+title: "Generate multiome aggregated object"
+author: "Marina Nikolova"
+date: "2023-02-23"
+output: html_document
+---
+
+```{r}
+
+library(Seurat)
+library(Signac)
+library(AnnotationHub)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(hdf5r)
+library(EnsDb.Hsapiens.v86)
+library(biovizBase)
+
+```
+
+```{r}
+
+counts <- Read10X_h5("/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/rawdata/multiome/processed/aggr/outs/filtered_feature_bc_matrix.h5")
+seurat <- CreateSeuratObject(counts$`Gene Expression`,
+                             assay="RNA",
+                             project="BVO")
+
+ah <- AnnotationHub()
+ensdbs <- query(ah, c("EnsDb.Hsapiens"))
+ensdb_id <- ensdbs$ah_id[grep(paste0(" 98 EnsDb"), ensdbs$title)]
+ensdb <- ensdbs[[ensdb_id]]
+seqlevelsStyle(ensdb) <- "UCSC"
+annotations <- GetGRangesFromEnsDb(ensdb = ensdb)
+genome(annotations) <- "hg38"
+
+seurat[['ATAC']] <- CreateChromatinAssay(counts = counts$`Peaks`,
+                                         annotation = annotations,
+                                         fragments = "/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/rawdata/multiome/processed/aggr/outs/atac_fragments.tsv.gz",
+                                         sep = c(":", "-"),
+                                         genome = 'hg38')
+
+```
+# Peak calliong
+Peak calling with MACS2.
+The set of peaks identified using CellRanger often merges distinct peaks that are close together. This can create a problem for certain analyses, particularly motif enrichment analysis and peak-to-gene linkage. To identify a more accurate set of peaks, we can call peaks using MACS2 with the CallPeaks() function. Here we call peaks on all cells together, but we could identify peaks for each group of cells separately by setting the group.by parameter, and this can help identify peaks specific to rare cell populations.
+
+There is no R package for MACS2, but MACS2 is available in the Anaconda package repository for Linux or MacOS. 
+I went to anaconda.org > MACS2 and ran the command in terminal:
+$ conda activate base
+$ conda install -c bioconda macs2 
+
+```{r MACS2 peak calling}
+
+# it is important to first switch to the ATAC assay, otherwise MACS won;t work and you will get the error
+# Error in as.character.default(new("Assay", counts = new("dgCMatrix", i = c(36L,  : 
+#  no method for coercing this S4 class to a vector
+DefaultAssay(seurat) <- "ATAC"
+
+# call peaks using MACS2
+peaks.seurat <- CallPeaks(seurat, macs2.path = "/home/marinani/anaconda3/bin/macs2")
+
+# remove peaks on nonstandard chromosomes and in genomic blacklist regions
+peaks.seurat <- keepStandardChromosomes(peaks.seurat, pruning.mode = "coarse")
+peaks.seurat <- subsetByOverlaps(x = peaks.seurat, ranges = blacklist_hg38_unified, invert = TRUE)
+
+# quantify counts in each peak
+macs2_counts.seurat <- FeatureMatrix(
+  fragments = Fragments(seurat),
+  features = peaks.seurat,
+  cells = colnames(seurat)
+)
+
+# create a new assay using the MACS2 peak set and add it to the Seurat object
+seurat[["peaks"]] <- CreateChromatinAssay(
+  counts = macs2_counts.seurat,
+  fragments = "/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/rawdata/multiome/processed/aggr/outs/atac_fragments.tsv.gz",
+  annotation = annotations,
+  sep = c(":", "-"),
+  genome = 'hg38')
+
+```
+
+```{r}
+
+standard_chroms <- standardChromosomes(BSgenome.Hsapiens.UCSC.hg38)
+idx_standard_chroms <- which(as.character(seqnames(granges(seurat[['ATAC']]))) %in% standard_chroms)
+seurat[["ATAC"]] <- subset(seurat[["ATAC"]],
+                           features = rownames(seurat[["ATAC"]])[idx_standard_chroms])
+seqlevels(seurat[['ATAC']]@ranges) <- intersect(seqlevels(granges(seurat[['ATAC']])),
+                                                unique(seqnames(granges(seurat[['ATAC']]))))
+seurat <- PercentageFeatureSet(seurat, pattern = "^MT-", col.name = "percent.mt", assay = "RNA")
+seurat <- NucleosomeSignal(seurat, assay = "ATAC")
+seurat <- TSSEnrichment(seurat, assay = "ATAC", fast = FALSE)
+
+standard_chroms <- standardChromosomes(BSgenome.Hsapiens.UCSC.hg38)
+idx_standard_chroms <- which(as.character(seqnames(granges(seurat[['peaks']]))) %in% standard_chroms)
+seurat[["peaks"]] <- subset(seurat[["peaks"]],
+                           features = rownames(seurat[["peaks"]])[idx_standard_chroms])
+seqlevels(seurat[['peaks']]@ranges) <- intersect(seqlevels(granges(seurat[['peaks']])),
+                                                unique(seqnames(granges(seurat[['peaks']]))))
+seurat <- PercentageFeatureSet(seurat, pattern = "^MT-", col.name = "percent.mt", assay = "RNA")
+seurat <- NucleosomeSignal(seurat, assay = "peaks")
+seurat <- TSSEnrichment(seurat, assay = "peaks", fast = FALSE)
+
+samples <- read.csv("/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/rawdata/multiome/processed/samples.csv", header=T)
+seurat$sample <- samples$library_id[as.numeric(sapply(strsplit(colnames(seurat),"-"), "[", 2))]
+seurat$timepoint <- as.numeric(gsub("day", "", sapply(strsplit(seurat$sample, "_"), "[", 2)))
+seurat$line <- sapply(strsplit(seurat$sample, "_"), "[", 1)
+
+saveRDS(seurat, file="/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Multiome_day3_day4_day7/Objects/aggr.seurat.rds")
+
+```
+
+

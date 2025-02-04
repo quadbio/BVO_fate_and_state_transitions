@@ -1,0 +1,440 @@
+---
+title: "Comparison to primary data - brain-like BVOs with TF overexpression"
+author: "Marina Nikolova"
+date: "2024-03-04"
+output: html_document
+---
+
+
+# Setup
+
+Load packages.
+```{r load packages, echo = FALSE, message=FALSE, warning=FALSE}
+
+library(Seurat)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(gplots)
+
+source("~/feature_plots.r")
+
+```
+
+```{r load seurat object, echo = FALSE, message=FALSE, warning=FALSE}
+
+seurat <- readRDS("~/integrated_seurat.rds")
+ec <- readRDS("~/integrated_seurat_ec.rds")
+mural <- readRDS("~/integrated_seurat_mural.rds")
+
+# reorder the samples in the metadata to appear in the order desired by us
+tf_levels <- factor(c("ETS1","NR3C1", "LEF1", "FOXQ1","GFP"))
+ct_levels <- factor(c(0,1,2,4,3,6,5))
+# generate color palette
+tf_col <- setNames(c("#5392CB", "#8966A9", "#E7572A", "#F7C630", "#8ABE55"), factor(tf_levels))
+ct_col <- setNames(c("#F7DC6F", "#B7950B", "#F1C40F", "#DDB40D", "#73C6B6", "#387569", "#B03A2E"), factor(ct_levels))
+
+show_col(prettyrainbow_colscheme(30))
+show_col(c("#F7DC6F", "#F1C40F", "#DDB40D", "#B7950B", "#73C6B6", "#387569", "#B03A2E"))
+
+```
+
+# Comaprison to Crouch data
+Load the Crouch data
+```{r load Crouch data}
+
+# Data from Elizabeth E. Crouch et al (2022) Cell
+crouch_seurat <- readRDS("~/crouch_data.RDS")
+
+```
+
+```{r visualize crouch dataset, fig.width=18, fig.height=4}
+
+DimPlot(crouch_seurat, reduction = "umap", group.by = "cell_type")
+DimPlot(crouch_seurat, reduction = "umap", group.by = "sample")
+DimPlot(crouch_seurat, reduction = "umap", group.by = "seurat_clusters", label = T)
+DimPlot(crouch_seurat, reduction = "umap", group.by = "area")
+DimPlot(crouch_seurat, reduction = "umap", group.by = "age")
+
+FeaturePlot(crouch_seurat, reduction = "umap", features = c("CLDN5","RGS5", "APLNR", "GJA5", "ACTA2", "PDGFRB", "LUM"), order = T)
+FeaturePlot(crouch_seurat, reduction = "umap", features = c("CLDN5"), split.by = "age", order = T)
+
+# Initially I had compared BVO cells to all cells from Crouch et al but then I found out that GW20 contains no PECAM1+ or CLDN5+ cells. 
+# The cells that cluster with ECs from GW20 are positive for mural and immune or epithelial cell markers.
+# Therefore I repeat (below) all comparative analysis but excluding GW20.
+Idents(crouch_seurat) <- "age"
+crouch_seurat <- subset(crouch_seurat, idents = "GW20", invert = T)
+# Check
+FeaturePlot(crouch_seurat, reduction = "umap", features = c("CLDN5"), split.by = "age", order = T)
+
+```
+
+```{r preprocess Crouch reference}
+
+# I noticed that some ECs are labeled as pericytes (comparing to the original publication and marker genes), therefore I rename them based on the clusters in which they are
+crouch_seurat$seurat_clusters <- factor(crouch_seurat$seurat_clusters, levels = c(0,1,2,3,4,5,6,7,8,9,10,11,12))
+crouch_seurat$cell_type_MN <- crouch_seurat$seurat_clusters
+crouch_seurat$cell_type_MN <- factor(setNames(c("pericyte", # 0
+           "pericyte", # 1
+           "endothelial", # 2
+           "endothelial", # 3
+           "pericyte", # 4
+           "pericyte", # 5
+           "endothelial", # 6
+           "pericyte", # 7
+            "pericyte", # 8
+           "endothelial", # 9
+           "endothelial", # 10
+           "pericyte", # 11
+            "pericyte" # 12
+           ), levels(crouch_seurat$seurat_clusters))[crouch_seurat$seurat_clusters])
+
+DefaultAssay(crouch_seurat) <- "integrated"
+crouch_seurat <- FindNeighbors(crouch_seurat, dims = 1:20) %>%
+                FindClusters(resolution = 10)
+DimPlot(crouch_seurat, reduction = "umap", group.by = "integrated_snn_res.10")
+
+# Save reannotated Crouch object
+saveRDS(crouch_seurat, "~/Crouch_seurat_reannotated.rds")
+
+```
+
+
+```{r compare ECs to Crouch dataset with correlation, message=FALSE, warning=FALSE}
+
+# genes2cor <- intersect(VariableFeatures(crouch_seurat_EC), rownames(ec@assays$RNA@data))
+genes2cor <- intersect(rownames(crouch_seurat_EC@assays$RNA@data), rownames(ec@assays$RNA@data))
+
+# Calculate the average expression for each organ 
+avg_expr_fetal <- sapply(sort(unique(crouch_seurat_EC$age)), function(gw) rowMeans(crouch_seurat_EC@assays$RNA@data[,which(crouch_seurat_EC$age == gw)] ))
+avg_expr_invitro_tf <- sapply(levels(ec$orig.ident), function(tf) rowMeans(ec@assays$RNA@data[,which(ec$orig.ident == tf)] ))
+avg_expr_invitro_cl <- sapply(levels(ec$RNA_snn_res.0.2), function(tf) rowMeans(ec@assays$RNA@data[,which(ec$RNA_snn_res.0.2 == tf)] ))
+
+# Calculate the pairwise Pearson correlation 
+corr2ref_org_tf_pearson <- cor(avg_expr_invitro_tf[genes2cor,], avg_expr_fetal[genes2cor,], method="pearson")
+corr2ref_org_cl_pearson <- cor(avg_expr_invitro_cl[genes2cor,], avg_expr_fetal[genes2cor,], method="pearson")
+
+# Plot Pearson
+pdf("~/pearson_sim2_crouch_EC_per_GW_per_BVO_TF.pdf", width = 6, height = 6)
+heatmap.2(corr2ref_org_tf_pearson, scale="none", trace="none", key=F, keysize=0.5,Rowv = T, Colv = T, 
+          labRow = colnames(avg_expr_invitro_tf), labCol = colnames(avg_expr_fetal), cexRow=0.8, cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+dev.off()
+
+pdf("~/pearson_sim2_crouch_EC_per_GW_per_BVO_cluster.pdf", width = 6, height = 6)
+heatmap.2(corr2ref_org_cl_pearson, scale="none", trace="none", key=F, keysize=0.5,Rowv = T, Colv = T,
+          labRow = colnames(avg_expr_invitro_cl), labCol = colnames(avg_expr_fetal), cexRow=0.8, cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+dev.off()
+
+min(corr2ref_org_tf_pearson) # 0.7290747
+max(corr2ref_org_tf_pearson) # 0.8156253
+
+min(corr2ref_org_cl_pearson) # 0.7292111
+max(corr2ref_org_cl_pearson) # 0.8109677
+
+# Save the matrices as tables
+write.csv(corr2ref_org_tf_pearson,"~/corr2ref_org_tf_pearson_TF_EC_to_Crouch.csv")
+write.csv(corr2ref_org_cl_pearson,"~/corr2ref_org_cl_pearson_TF_EC_to_Crouch.csv")
+
+
+cl_tf <- as.data.frame(table(ec$RNA_snn_res.0.2, ec$orig.ident))
+  colnames(cl_tf)[which(names(cl_tf) == "Var1")] <- "Cluster"
+  colnames(cl_tf)[which(names(cl_tf) == "Var2")] <- "TF"
+     cl_tf <- cl_tf %>% 
+    group_by(TF) %>% 
+    mutate(Total = sum(Freq))
+  cl_tf <- cl_tf %>% 
+    mutate(Frac = Freq/Total)
+  clusters <- c("4","1","2","3","0")
+  tfs <- c("FOXQ1","NR3C1","LEF1","ETS1","GFP")
+# Stacked condition per cluster
+  prop1 <- ggplot(cl_tf, aes(fill=TF, x=Freq, y=Cluster)) + 
+      geom_bar(position="fill", stat="identity") + 
+      ggplot2::theme_classic() + 
+      xlab("Proportion of cells") + 
+      ylab("Cluster") +
+      scale_fill_manual(values=tf_col) +
+     theme(plot.title = element_text(size=16), axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) +
+     ggtitle("Proportion of cells from clusters per TF condition") + 
+    scale_y_discrete(limits = rev(clusters))
+  pdf("~/prop_TF_per_cluster_ec_heatmap_order.pdf",  width = 7, height = 7)
+    prop1
+  dev.off()
+# Stacked cluster per condition
+  prop2 <- ggplot(cl_tf, aes(fill=Cluster, y=TF, x=Freq)) + 
+      geom_bar(position="fill", stat="identity") + 
+      ggplot2::theme_classic() + 
+      xlab("Proportion of cells") + 
+      ylab("TF overexpression") +
+      scale_fill_manual(values= ct_col_ec) +
+     theme(plot.title = element_text(size=16), axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) +   
+    ggtitle("Proportion of cells from TF condition per cluster") + 
+    scale_y_discrete(limits = rev(tfs))
+  pdf("~/prop_cluster_per_TF_ec_heatmap_order.pdf",  width = 7, height = 7)
+    prop2
+  dev.off()
+
+```
+
+# Mural cells
+
+```{r compare mural cells to Crouch dataset with correlation, message=FALSE, warning=FALSE}
+
+# genes2cor <- intersect(VariableFeatures(crouch_seurat_pericyte), rownames(mural@assays$RNA@data))
+genes2cor <- intersect(rownames(crouch_seurat_pericyte@assays$RNA@data), rownames(mural@assays$RNA@data))
+
+# Calculate the average expression for each organ 
+avg_expr_fetal <- sapply(sort(unique(crouch_seurat_pericyte$age)), function(gw) rowMeans(crouch_seurat_pericyte@assays$RNA@data[,which(crouch_seurat_pericyte$age == gw)] ))
+avg_expr_invitro_tf <- sapply(levels(mural$orig.ident), function(tf) rowMeans(mural@assays$RNA@data[,which(mural$orig.ident == tf)] ))
+avg_expr_invitro_cl <- sapply(levels(mural$RNA_snn_res.0.2), function(tf) rowMeans(mural@assays$RNA@data[,which(mural$RNA_snn_res.0.2 == tf)] ))
+
+# Calculate the pairwise Pearson correlation 
+corr2ref_org_tf_pearson <- cor(avg_expr_invitro_tf[genes2cor,], avg_expr_fetal[genes2cor,], method="pearson")
+corr2ref_org_cl_pearson <- cor(avg_expr_invitro_cl[genes2cor,], avg_expr_fetal[genes2cor,], method="pearson")
+
+# Plot Pearson
+pdf("Plots/pearson_sim2_crouch_mural_per_GW_per_BVO_TF.pdf", width = 6, height = 6)
+heatmap.2(corr2ref_org_tf_pearson, scale="none", trace="none", key=F, keysize=0.5,Rowv = T, Colv = T, 
+          labRow = colnames(avg_expr_invitro_tf), labCol = colnames(avg_expr_fetal), cexRow=0.8, cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+dev.off()
+
+pdf("Plots/pearson_sim2_crouch_mural_per_GW_per_BVO_cluster.pdf", width = 6, height = 6)
+heatmap.2(corr2ref_org_cl_pearson, scale="none", trace="none", key=F, keysize=0.5,Rowv = T, Colv = T,
+          labRow = colnames(avg_expr_invitro_cl), labCol = colnames(avg_expr_fetal), cexRow=0.8, cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+dev.off()
+
+min(corr2ref_org_tf_pearson) # 0.7107835
+max(corr2ref_org_tf_pearson) # 0.8138863
+
+min(corr2ref_org_cl_pearson) # 0.6275894
+max(corr2ref_org_cl_pearson) # 0.8158783
+
+
+# Save the matrices as tables
+write.csv(corr2ref_org_tf_pearson,"~/corr2ref_org_tf_pearson_TF_mural_to_Crouch.csv")
+write.csv(corr2ref_org_cl_pearson,"~/corr2ref_org_cl_pearson_TF_mural_to_Crouch.csv")
+
+
+
+# Calculate the pairwise Spearman correlation 
+corr2ref_org_tf_spearman <- cor(avg_expr_invitro_tf[genes2cor,], avg_expr_fetal[genes2cor,], method="spearman")
+corr2ref_org_cl_spearman <- cor(avg_expr_invitro_cl[genes2cor,], avg_expr_fetal[genes2cor,], method="spearman")
+
+# Plot Spearman
+pdf("~/spearman_sim2_crouch_mural_per_GW_per_BVO_TF.pdf", width = 6, height = 6)
+heatmap.2(corr2ref_org_tf_spearman, scale="none", trace="none", key=F, keysize=0.5,Rowv = T, Colv = T, 
+          labRow = colnames(avg_expr_invitro_tf), labCol = colnames(avg_expr_fetal), cexRow=0.8, cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+dev.off()
+
+pdf("~/spearman_sim2_crouch_mural_per_GW_per_BVO_cluster.pdf", width = 6, height = 6)
+heatmap.2(corr2ref_org_cl_spearman, scale="none", trace="none", key=F, keysize=0.5,Rowv = T, Colv = T,
+          labRow = colnames(avg_expr_invitro_cl), labCol = colnames(avg_expr_fetal), cexRow=0.8, cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+dev.off()
+
+min(corr2ref_org_tf_spearman) # 0.7592098
+max(corr2ref_org_tf_spearman) # 0.8039774
+
+min(corr2ref_org_cl_spearman) # 0.7287944
+max(corr2ref_org_cl_spearman) # 0.8231562
+
+
+cl_tf <- as.data.frame(table(mural$RNA_snn_res.0.2, mural$orig.ident))
+  colnames(cl_tf)[which(names(cl_tf) == "Var1")] <- "Cluster"
+  colnames(cl_tf)[which(names(cl_tf) == "Var2")] <- "TF"
+   cl_tf <- cl_tf %>% 
+    group_by(TF) %>% 
+    mutate(Total = sum(Freq))
+  cl_tf <- cl_tf %>% 
+    mutate(Frac = Freq/Total)
+  clusters <- c("3","1","2","0","4", "5")
+  tfs <- c("FOXQ1","NR3C1","LEF1","GFP","ETS1")
+# Stacked condition per cluster
+  prop1 <- ggplot(cl_tf, aes(fill=TF, x=Freq, y=Cluster)) + 
+      geom_bar(position="fill", stat="identity") + 
+      ggplot2::theme_classic() + 
+      xlab("Proportion of cells") + 
+      ylab("Cluster") +
+      scale_fill_manual(values=tf_col) +
+     theme(plot.title = element_text(size=16), axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) +
+     ggtitle("Proportion of cells from clusters per TF condition") + 
+    scale_y_discrete(limits = rev(clusters))
+  pdf("~/prop_TF_per_cluster_mural_heatmap_order.pdf",  width = 7, height = 7)
+    prop1
+  dev.off()
+# Stacked cluster per condition
+  prop2 <- ggplot(cl_tf, aes(fill=Cluster, y=TF, x=Freq)) + 
+      geom_bar(position="fill", stat="identity") + 
+      ggplot2::theme_classic() + 
+      xlab("Proportion of cells") + 
+      ylab("TF overexpression") +
+      scale_fill_manual(values= ct_col_mural) +
+     theme(plot.title = element_text(size=16), axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) +   
+    ggtitle("Proportion of cells from TF condition per cluster") + 
+    scale_y_discrete(limits = rev(tfs))
+  pdf("~/prop_cluster_per_TF_mural_heatmap_order.pdf",  width = 7, height = 7)
+    prop2
+  dev.off()
+
+```
+
+# Compare to Cao et al
+```{r find Cao et al organ markers}
+
+seurat_endo <- readRDS("~/endothelial_brain_pericyte_excl.seurat.RDS")
+dat_endo_ct <- readRDS("~/dat.manual_annotated_ct.datalist.rds")
+
+# Define Cerebellum and Cerebrum as Brain
+seurat_endo$Organ2 <- seurat_endo$Organ
+seurat_endo$Organ2 <- gsub("Cerebellum", "Brain",seurat_endo$Organ2)
+seurat_endo$Organ2 <- gsub("Cerebrum", "Brain",seurat_endo$Organ2)
+
+Idents(seurat_endo) <- "Organ2"
+seurat_endo_markers <- FindAllMarkers(seurat_endo, min.pct = 0.1, logfc.threshold = log(0.1), only.pos = F)
+seurat_endo_markers %>%
+    slice_max(n = 30, order_by = avg_log2FC)
+
+seurat_endo_markers$gene <- rownames(seurat_endo_markers)
+seurat_endo_markers <- seurat_endo_markers %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.05, gene, NA))
+
+  seurat_endo_markers$p_val_adj[seurat_endo_markers$p_val_adj == 0.000000e+00] <- min(seurat_endo_markers$p_val_adj[which(seurat_endo_markers$p_val_adj != 0)])
+
+# Add to the table another column with outcome
+seurat_endo_markers <- seurat_endo_markers %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.05 ~ "Enriched",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.05  ~ "Depleted",
+                           TRUE ~ "Unchanged")
+    )
+
+# Remove RP and MT genes
+blacklist <- c(grep("^MT-", seurat_endo_markers$gene, value=T), read.table("~/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(seurat_endo_markers$gene, blacklist)
+seurat_endo_markers <- seurat_endo_markers %>% filter(gene %in% diff_genes)
+
+seurat_endo_markers.up <- seurat_endo_markers %>% 
+      filter(outcome == "Enriched")  %>%
+      arrange(desc(avg_log2FC), .by_group = TRUE)
+seurat_endo_markers.down <- seurat_endo_markers %>% filter(outcome == "Depleted") 
+
+
+write.csv(seurat_endo_markers, "~/Cao_endo_markers_organ.csv")
+
+```
+
+```{r extract TFs from Cao et al organ markers}
+
+human_TF <- read.table("~/AnimalTFDB/AnimalTFDB_v3/Homo_sapiens_TF.tsv", sep = '\t', header = TRUE, fill = TRUE)
+
+seurat_endo_marker_TF <- as.data.frame(seurat_endo_markers) %>% 
+      filter(gene %in% human_TF$Symbol)  %>% 
+      arrange(cluster, desc(avg_log2FC))
+
+write.csv(seurat_endo_marker_TF, "~/Cao_endo_marker_TF.csv")
+
+seurat_endo_marker_TF_brain <- seurat_endo_marker_TF %>% filter(cluster == "Brain")
+seurat_endo_markers_brain <- seurat_endo_markers %>% filter(cluster == "Brain")
+
+ggplot(seurat_endo_markers_brain, aes(x = avg_log2FC, y = -log10(p_val_adj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 20) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "#C73E04", "gray50")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+```
+
+# Load HTO data and use for comparison 
+```{r}
+
+hto_endo <- readRDS(file="~/Objects/seurat.endothelial.rds")
+
+```
+
+```{r compare HTO and TF ECs to Crouch dataset with correlation, message=FALSE, warning=FALSE}
+
+DefaultAssay(hto_endo) <- "RNA"
+genes2cor <- Reduce(intersect, list(rownames(crouch_seurat_EC@assays$RNA@data), rownames(ec@assays$RNA@data), rownames(hto_endo@assays$RNA@data)))
+
+# Calculate the average expression for each organ 
+avg_expr_fetal <- sapply(sort(unique(crouch_seurat_EC$age)), function(gw) rowMeans(crouch_seurat_EC@assays$RNA@data[,which(crouch_seurat_EC$age == gw)] ))
+avg_expr_invitro_tf <- sapply(levels(ec$orig.ident), function(tf) rowMeans(ec@assays$RNA@data[,which(ec$orig.ident == tf)] ))
+avg_expr_hto <- sapply(levels(hto_endo$HTO_classification), function(hto) rowMeans(hto_endo@assays$RNA@data[,which(hto_endo$HTO_classification == hto)] ))
+
+# Calculate the pairwise Pearson correlation 
+corr2ref_org_tf_pearson <- cor(cbind(avg_expr_invitro_tf[genes2cor,], avg_expr_hto[genes2cor,]), avg_expr_fetal[genes2cor,], method="pearson")
+
+# Plot Pearson
+heatmap.2(corr2ref_org_tf_pearson, scale="none", trace="none", key=F, keysize=0.5,Rowv = T, Colv = T, 
+          labRow = colnames(c(avg_expr_invitro_tf, avg_expr_hto)), labCol = colnames(avg_expr_fetal), cexRow=0.8, cexCol=0.8,
+          col=colorRampPalette(rev(c("#b2182b","#d6604d","#f4a582","#fddbc7","#f7f7f7","#d1e5f0","#92c5de","#4393c3","#2166ac")))(30))
+
+```
+
+# Compare all BVO EC data to Cao et al organs
+```{r fig.width=10}
+
+# Load organ endo data
+seurat_invitro <- readRDS("~/data.seurat_untransplanted_noWTC_endoBranch_cleanedup.rds")
+seurat_transpl <- readRDS("~/data.seurat_transplanted_endothelial.rds")
+seurat_endo_orgs <- readRDS(file="~/endothelial_organs_brain_pericyte_excl.seurat.RDS")
+dat_endo_ct <- readRDS("~/dat.manual_annotated_ct_brain_pericytes_excl.datalist.rds")
+
+# Calculate average gene expression of the top 2000 variable genes for each organ
+avg_expr_orgs <- sapply(seurat_endo_orgs, function(srt) rowMeans(srt@assays$RNA@data[VariableFeatures(seurat_endo)[1:2000],]))
+# Calculate distance between organs
+hcl_orgs <- hclust(as.dist(1-cor(avg_expr_orgs)), method="ward.D2")
+# Reorder columns to match the hcl order
+orgs_ordered <- names(seurat_endo_orgs)[hcl_orgs$order]
+avg_expr_orgs <- avg_expr_orgs[,orgs_ordered]
+
+vargenes_tf <- intersect(rownames(avg_expr_invitro_tf),rownames(dat_endo_ct$meta.features)[order(dat_endo_ct$meta.features$vst.variance.standardized,decreasing=T)[1:2000]])
+vargenes_hto <- intersect(rownames(avg_expr_hto),rownames(dat_endo_ct$meta.features)[order(dat_endo_ct$meta.features$vst.variance.standardized,decreasing=T)[1:2000]])
+ 
+corr2ref_org_tf_pearson <- cor(cbind(avg_expr_invitro_tf[vargenes_tf,]), avg_expr_orgs[vargenes_tf,], method="pearson")
+mat_norm_tf <- apply(t(corr2ref_org_tf_pearson), 1, function(x) (x-x[5])/(max(x,na.rm=T)-min(x,na.rm=T)))
+max(corr2ref_org_tf_pearson) # 0.4939166
+min(corr2ref_org_tf_pearson) # 0.08468226
+
+corr2ref_org_hto_pearson <- cor(cbind(avg_expr_hto[vargenes_hto,]), avg_expr_orgs[vargenes_hto,], method="pearson")
+mat_norm_hto <- apply(t(corr2ref_org_hto_pearson), 1, function(x) (x-x[1])/(max(x,na.rm=T)-min(x,na.rm=T)))
+max(corr2ref_org_hto_pearson) # 0.3866341
+min(corr2ref_org_hto_pearson) # 0.04069212
+ 
+# Save
+write.csv(corr2ref_org_tf_pearson,"~/corr2ref_org_tf_pearson_EC_to_Cao.csv")
+
+
+# Plot similarity in gene expression between ECs from BVO with different TFs induced and ECs from Cao et al, stratified by organ
+pdf("~/heatmap_sim2_Cao-highvar_tf.pdf", height=2.5)
+gplots::heatmap.2(mat_norm_tf, Rowv=NA, Colv=NA, dendrogram="none", key=F, keysize=0.2, col=bluewhitered_colscheme(30), scale="none", trace="none",
+                  labCol = c(dat_endo_ct$Organ),
+                  labRow = c(colnames(avg_expr_invitro_tf)),
+                  margins = c(10,6), cexCol = 0.7, cexRow=0.5, na.color = "#303030")
+dev.off()
+
+# Plot gene expression of brain-enriched TFs in the endothelial cells from Cao et al and in the endothelial cells from BVos treated with small molecules
+mat_norm <- apply(avg_exp_org[c("ETS1","NR3C1","LEF1","FOXQ1"),], 1, function(x) (x))
+mat_notm_hto <- apply(avg_expr_hto[c("ETS1","NR3C1","LEF1","FOXQ1"),], 1, function(x) (x))
+mt <- rbind(mat_norm,
+            mat_notm_hto
+            )
+
+pdf("~/heatmap_nonscaled_cao_org_BVO_HTOs_TFs.pdf", width = 8, height = 4)
+heatmap.2(t(mt), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+
