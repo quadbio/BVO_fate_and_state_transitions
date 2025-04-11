@@ -1,0 +1,428 @@
+---
+title: "Create a diabetes CSS integrated seurat object"
+author: "Marina Nikolova"
+date: "26/07/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/")
+
+```
+
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+# Generate two useful color palettes
+colors_dutch <- c(
+  '#FFC312','#C4E538','#12CBC4','#FDA7DF','#ED4C67',
+  '#F79F1F','#A3CB38','#1289A7','#D980FA','#B53471',
+  '#EE5A24','#009432','#0652DD','#9980FA','#833471',
+  '#EA2027','#006266','#1B1464','#5758BB','#6F1E51'
+)
+
+colors_spanish <- c(
+  '#40407a','#706fd3','#f7f1e3','#34ace0','#33d9b2',
+  '#2c2c54','#474787','#aaa69d','#227093','#218c74',
+  '#ff5252','#ff793f','#d1ccc0','#ffb142','#ffda79',
+  '#b33939','#cd6133','#84817a','#cc8e35','#ccae62'
+)
+
+custom_colors$discrete <- c(colors_dutch, colors_spanish)
+
+custom_colors$cell_cycle <- setNames(
+  c('#45aaf2', '#f1c40f', '#e74c3c', '#7f8c8d'),
+  c('G1',      'S',       'G2M',     '-')
+)
+
+show_col(c(c("#1F618D","#2874A6"),
+                     colorRampPalette(c("#0a4a3d","#138D75","#73C6B6"))(5),
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B","#876e08"))(5),
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(4), 
+                     c("#BFC9CA","#566573","#273746")))
+
+```
+
+
+Load data
+```{r load matrices and metadata}
+
+# Control - original protocol
+
+ctrl_1 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/rawdata/diabetic_bvo/processed/138143/outs/filtered_feature_bc_matrix/"), project = "Control_1", min.cells = 3, min.features = 200)
+ctrl_2 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230412_P2364_MARINA_MECOM_KO_and_diabetic_BVOs/processed/ctrl_d22_1/outs/filtered_feature_bc_matrix/"), project = "Control_2", min.cells = 3, min.features = 200)
+# ctrl_3 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230412_P2364_MARINA_MECOM_KO_and_diabetic_BVOs/processed/ctrl_d22_2/outs/filtered_feature_bc_matrix/"), project = "Control_3", min.cells = 3, min.features = 200)
+
+# Inflammatory - as additional control
+infl_1 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/rawdata/diabetic_bvo/processed/138145/outs/filtered_feature_bc_matrix/"), project = "Inflammatory_1", min.cells = 3, min.features = 200)
+infl_2 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230412_P2364_MARINA_MECOM_KO_and_diabetic_BVOs/processed/infl_d22_1/outs/filtered_feature_bc_matrix/"), project = "Inflammatory_2", min.cells = 3, min.features = 200)
+infl_3 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230412_P2364_MARINA_MECOM_KO_and_diabetic_BVOs/processed/infl_d22_2/outs/filtered_feature_bc_matrix/"), project = "Inflammatory_3", min.cells = 3, min.features = 200)
+
+# Diabetic
+diabetic_1 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/USERS/zhisong_he/Work/vascular_organoids/rawdata/diabetic_bvo/processed/138147/outs/filtered_feature_bc_matrix/"), project = "Diabetic_1", min.cells = 3, min.features = 200)
+diabetic_2 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230412_P2364_MARINA_MECOM_KO_and_diabetic_BVOs/processed/diab_d22_1/outs/filtered_feature_bc_matrix/"), project = "Diabetic_2", min.cells = 3, min.features = 200)
+diabetic_3 <- CreateSeuratObject(counts = Read10X(data.dir = "/links/groups/treutlein/DATA/sequencing/20230412_P2364_MARINA_MECOM_KO_and_diabetic_BVOs/processed/diab_d22_2/outs/filtered_feature_bc_matrix/"), project = "Diabetic_3", min.cells = 3, min.features = 200)
+
+```
+
+Create a Seurat object
+```{r create Seurat object}
+
+merged <- merge(ctrl_1, list(ctrl_2, 
+                              infl_1, 
+                              infl_2, 
+                              infl_3,
+                              diabetic_1, 
+                              diabetic_2,
+                              diabetic_3
+                              ))
+merged <- PercentageFeatureSet(merged, "^MT-", col.name = "percent.mt")
+
+```
+
+
+# QC
+```{r check quality pre-subsetting}
+
+# reorder the samples in the metadata to appear in the order desired by us
+diab_levels <- factor(c("Control_1", "Control_2", "Inflammatory_1", "Inflammatory_2","Inflammatory_3", "Diabetic_1", "Diabetic_2","Diabetic_3"))
+merged$orig.ident <- factor(merged$orig.ident, levels = diab_levels)
+Idents(merged) <- "orig.ident"
+# generate color palette based on vintage_cols palette
+diab_col_sample <-setNames(c(c( "#E75729", "#DC3838", # red
+                                "#81BD60", "#C8C428", "#F7C830", # green
+                                "#6D7CBA", "#3EADC7", "#3EB4B9" # blue
+                          )), diab_levels)
+
+pdf("Plots/nFeature_pre-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = diab_col_sample, pt.size=0)
+dev.off()
+
+pdf("Plots/nCount_pre-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = diab_col_sample, pt.size=0)
+dev.off()
+
+pdf("Plots/percent.mt_pre-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = diab_col_sample, pt.size=0)
+dev.off()
+
+```
+
+
+```{r subset low quality cells}
+
+merged <- subset(merged, subset = percent.mt < 20 & nFeature_RNA > 2000 & nCount_RNA < 150000)
+
+```
+
+```{r check quality post-subsetting}
+
+pdf("Plots/nFeature_post-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = diab_col_sample, pt.size=0)
+dev.off()
+
+pdf("Plots/nCount_post-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = diab_col_sample, pt.size=0)
+dev.off()
+
+pdf("Plots/percent.mt_post-QC.pdf", width = 12, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = diab_col_sample, pt.size=0)
+dev.off()
+
+```
+
+```{r save merged non-filtered non-normalized object}
+
+saveRDS(merged, "Objects/object.merged.rds") 
+
+```
+
+
+```{r preprocess and integrate}
+
+merged <- NormalizeData(merged) %>% CellCycleScoring(g2m.features=cc.genes.updated.2019$g2m.genes, s.features=cc.genes.updated.2019$s.genes) %>% FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(merged) <- setdiff(VariableFeatures(merged), c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(merged), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1]))
+
+merged <- ScaleData(merged, vars.to.regress = c("percent.mt", "nFeature_RNA", "nCount_RNA","G2M.Score","S.Score")) %>%
+  RunPCA(npcs=30, verbose=F) %>%
+  RunUMAP(dims=1:20)
+
+seurat <- cluster_sim_spectrum(merged, label_tag="orig.ident", cluster_resolution=1) %>%
+  run_PCA(reduction="css", npcs=20, reduction.name="csspca", reduction.key="CSSPCA_") %>%
+  RunUMAP(reduction="csspca", dims=1:20, reduction.name="umap_css", reduction.key="UMAPCSS_", seed = 50)
+
+# Add identities
+seurat$condition <- seurat$orig.ident
+seurat$condition <- gsub(c("Control_1"), "Control", seurat$condition)
+seurat$condition <- gsub(c("Control_2"), "Control", seurat$condition)
+seurat$condition <- gsub(c("Inflammatory_1"), "Inflammatory", seurat$condition)
+seurat$condition <- gsub(c("Inflammatory_2"), "Inflammatory", seurat$condition)
+seurat$condition <- gsub(c("Inflammatory_3"), "Inflammatory", seurat$condition)
+seurat$condition <- gsub(c("Diabetic_1"), "Diabetic", seurat$condition)
+seurat$condition <- gsub(c("Diabetic_2"), "Diabetic", seurat$condition)
+seurat$condition <- gsub(c("Diabetic_3"), "Diabetic", seurat$condition)
+
+```
+
+```{r check cell cycle phase}
+
+df <- as.data.frame(table(merged$Phase, merged$orig.ident))
+colnames(df)[which(names(df) == "Var1")] <- "Phase"
+colnames(df)[which(names(df) == "Var2")] <- "orig.ident"
+
+pdf("Plots/cell_prop_orig.ident_cell_phase.pdf", width = 4, height = 3)
+ggplot(df, aes(fill=Phase, y=Freq, x=orig.ident)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values= c("#bdbdbd", "#737373",  "#252525")) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Phase') 
+dev.off()
+
+```
+
+```{r visualize integrated data}
+
+Idents(seurat) <- "orig.ident"
+png("Plots/umap_css_by_sample.png", width = 500, height = 500)
+DimPlot(seurat, reduction="umap_css", cols = diab_col_sample, group.by = "orig.ident") & NoAxes() 
+dev.off()
+
+pdf("Plots/umap_css_by_sample.pdf", width = 5, height = 5)
+plotFeature(Embeddings(seurat, "umap_css"), seurat$orig.ident, do_label = F, label_round = T, cex.label = 1.2, colorPal= diab_col_sample, cex=0.3, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+pdf("Plots/umap_css_split_by_sample.pdf", width = 45, height = 5)
+DimPlot(seurat, reduction="umap_css", cols = diab_col_sample, split.by = "orig.ident", group.by = "orig.ident") & NoAxes() 
+dev.off()
+
+png("Plots/umap_css_split_by_sample.png", width = 9000, height = 1300, res = 500)
+DimPlot(seurat, reduction="umap_css", cols = diab_col_sample, split.by = "orig.ident", group.by = "orig.ident") & NoAxes() 
+dev.off()
+
+FeaturePlot(seurat, features = c("MECOM","CLDN5","PDGFRB","MKI67", "NR2F2", "percent.mt", "nCount_RNA", "nFeature_RNA", "ACTA2"), cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol=3, reduction = "umap_css") & NoAxes() & NoLegend()
+FeaturePlot(seurat, features = c("NR2F2","COL1A1","IGFBP5", "IGFBP3"), cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol=3, reduction = "umap_css") & NoAxes() & NoLegend()
+
+```
+
+```{r visualize per condition}
+
+# Subset cells from each condition
+Idents(seurat) <- "condition"
+c <- WhichCells(seurat, idents = "Control")
+i <- WhichCells(seurat, idents = "Inflammatory")
+d <- WhichCells(seurat, idents = "Diabetic")
+
+
+# plot each condition separately
+png("Plots/umap_by_condition_sep.png", width = 6000, height = 1700, res = 500)
+DimPlot(seurat, cells.highlight = c,  reduction="umap_css", cols.highlight = c("#E14730"), cols = "lightgray", order = T, pt.size = 0.3, sizes.highlight = 0.5) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = i,  reduction="umap_css", cols.highlight = c("#ABC12B"), cols = "lightgray", order = T, pt.size = 0.3, sizes.highlight = 0.5) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = d,  reduction="umap_css", cols.highlight = c("#5293CC"), cols = "lightgray", order = T, pt.size = 0.3, sizes.highlight = 0.5) & NoAxes() & NoLegend() 
+dev.off()
+
+```
+
+
+```{r cluster}
+
+seurat <- FindNeighbors(seurat, graph.name=c("RNA_css_nn","RNA_css_snn"), reduction="csspca", dims=1:20) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.35) #%>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.2) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.3) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.4) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.5) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.8) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=1.5) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=10)
+
+avg_av_cond_cl <- sapply(levels(seurat$RNA_css_snn_res.0.35), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_css_snn_res.0.35==x)]))
+hcl_cl <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond_cl[VariableFeatures(seurat),])), method="ward.D2")
+
+conditions <- c("Control","Inflammatory","Diabetic")
+cols_cond <- c( "#E14730", "#ABC12B","#5293CC")
+seurat$condition <- factor(seurat$condition, levels=conditions)
+      
+res.0.35_levels <- c(8,9,10,5,6,4,11,3,7,0,1,2)
+cols_cl <- c("#F5B7B1","#EB6F63","#D44637","#B03A2E", "#F7DC6F", "#F4D145", "#F1C71C", "#E0B60D", "#C7A20C", "#B08F0A", "#9B7E09", "#876E08")
+seurat$RNA_css_snn_res.0.35 <- factor(seurat$RNA_css_snn_res.0.35, levels=res.0.35_levels)
+
+pdf("Plots/umap_css_by_cluster.pdf", width = 5, height = 5)
+plotFeature(Embeddings(seurat, "umap_css"), seurat$RNA_css_snn_res.0.35, do_label = T, label_round = T, cex.label = 1.2, cex=0.5, pt_border = T, lwd_border = 0.1, colorPal = cols_cl)
+dev.off()
+
+png("Plots/umap_css_by_cluster.png", width = 2600, height = 2200, res = 500)
+plotFeature(Embeddings(seurat, "umap_css"), seurat$RNA_css_snn_res.0.35, cex.label = 1.2, cex=0.5, pt_border = T, lwd_border = 0.1, colorPal = cols_cl)
+dev.off()
+
+png("Plots/umap_css_by_cluster_labeled.png", width = 2000, height = 2000, res=500)
+DimPlot(seurat, reduction="umap_css", group.by = "RNA_css_snn_res.0.35", label=T, cols = cols_cl) & NoAxes() 
+dev.off()
+
+
+pdf("Plots/umap_css_by_condition.pdf", width = 5, height = 5)
+plotFeature(Embeddings(seurat, "umap_css"), seurat$condition, do_label = F, label_round = T, cex.label = 1.2, colorPal= cols_cond, cex=0.5, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+png("Plots/umap_css_by_condition.png", width = 2600, height = 2200, res = 500)
+plotFeature(Embeddings(seurat, "umap_css"), seurat$condition, cex.label = 1.2, cex=0.5, pt_border = T, lwd_border = 0.1, colorPal = cols_cond)
+dev.off()
+
+show_col(c(c("#1F618D","#2874A6"),
+                     colorRampPalette(c("#0a4a3d","#138D75","#73C6B6"))(5),
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B","#876e08"))(8),
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(4), 
+                     c("#BFC9CA","#566573","#273746")))
+
+seurat$major_ct <- seurat$RNA_css_snn_res.0.3 
+seurat$major_ct <- gsub(c(3), "Mural", seurat$major_ct)
+seurat$major_ct <- gsub(c(0), "Mural", seurat$major_ct)
+seurat$major_ct <- gsub(c(1), "Mural", seurat$major_ct)
+seurat$major_ct <- gsub(c(7), "Mural", seurat$major_ct)
+seurat$major_ct <- gsub(c(4), "Mural", seurat$major_ct)
+seurat$major_ct <- gsub(c(2), "Mural", seurat$major_ct)
+seurat$major_ct <- gsub(c(8), "Endothelial", seurat$major_ct)
+seurat$major_ct <- gsub(c(5), "Endothelial", seurat$major_ct)
+seurat$major_ct <- gsub(c(6), "Endothelial", seurat$major_ct)
+
+```
+
+
+```{r save integrated object}
+
+saveRDS(seurat, "Objects/diabetes_css_integrated_seurat.rds")
+
+```
+
+
+# Subset endothelial cells only
+```{r subset endotheliall cells}
+
+Idents(seurat) <- "RNA_css_snn_res.0.35"
+ec <- subset(seurat, idents = c(8,9,10,5))
+Idents(ec) <- "orig.ident"
+
+ec <- CellCycleScoring(ec, g2m.features=cc.genes.updated.2019$g2m.genes, s.features=cc.genes.updated.2019$s.genes) %>% FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(ec) <- setdiff(VariableFeatures(ec), c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(ec), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1]))
+
+ec <- ScaleData(ec, vars.to.regress = c("percent.mt", "nFeature_RNA", "nCount_RNA","G2M.Score","S.Score")) %>%
+  RunPCA(npcs=30, verbose=F) %>%
+  RunUMAP(dims=1:20)
+
+ec <- cluster_sim_spectrum(ec, label_tag="orig.ident", cluster_resolution=1) %>%
+  run_PCA(reduction="css", npcs=20, reduction.name="csspca", reduction.key="CSSPCA_") %>%
+  RunUMAP(reduction="csspca", dims=1:20, reduction.name="umap_css", reduction.key="UMAPCSS_")
+
+```
+
+```{r cluster endothelial cells}
+
+ec <- FindNeighbors(ec, graph.name=c("RNA_css_nn","RNA_css_snn"), reduction="csspca", dims=1:20) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.07) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.1) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.2) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.4) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.5) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.8)
+
+p1 <- DimPlot(ec, reduction="umap_css", group.by="condition") & NoAxes() 
+p2 <- DimPlot(ec, reduction="umap_css", group.by="RNA_css_snn_res.0.07", label=T) & NoAxes() & NoLegend()
+(p1|p2)
+
+cols_cl_ec <- c("#F5B7B1","#EB6F63","#D44637", "#B03A2E")
+levels_ec_res.0.1 <- c(1,3,0,2)
+ec$RNA_css_snn_res.0.07 <- factor(ec$RNA_css_snn_res.0.07, levels=levels_ec_res.0.1)
+
+pdf("Plots/EC_umap_css_by_cluster.pdf", width = 4, height = 4)
+plotFeature(Embeddings(ec, "umap_css"), ec$RNA_css_snn_res.0.07, do_label = F, label_round = T, cex.label = 1.2, colorPal= cols_cl_ec, cex=0.7, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+png("Plots/EC_umap_css_by_cluster_labeled.png", width = 400, height = 400)
+DimPlot(ec, reduction="umap_css", group.by = "RNA_css_snn_res.0.07", label=T, cols = cols_cl_ec) & NoAxes() 
+dev.off()
+
+png("Plots/EC_umap_css_by_cluster.png", width = 400, height = 400)
+DimPlot(ec, reduction="umap_css", group.by = "RNA_css_snn_res.0.07", cols = cols_cl_ec) & NoAxes() 
+dev.off()
+
+```
+
+```{r save endothelial object}
+
+saveRDS(ec, "Objects/diabetes_css_integrated_seurat_endothelial.rds")
+
+```
+
+# Subset mural cells only
+```{r subset mural cells}
+
+Idents(seurat) <- "RNA_css_snn_res.0.35"
+mural <- subset(seurat, idents = c(6,4,11,3,7,0,1,2))
+Idents(mural) <- "orig.ident"
+
+mural <- CellCycleScoring(mural, g2m.features=cc.genes.updated.2019$g2m.genes, s.features=cc.genes.updated.2019$s.genes) %>% FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(mural) <- setdiff(VariableFeatures(mural), c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(mural), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1]))
+
+mural <- ScaleData(mural, vars.to.regress = c("percent.mt", "nFeature_RNA", "nCount_RNA","G2M.Score","S.Score")) %>%
+  RunPCA(npcs=30, verbose=F) %>%
+  RunUMAP(dims=1:20)
+
+mural <- cluster_sim_spectrum(mural, label_tag="orig.ident", cluster_resolution=1) %>%
+  run_PCA(reduction="css", npcs=20, reduction.name="csspca", reduction.key="CSSPCA_") %>%
+  RunUMAP(reduction="csspca", dims=1:20, reduction.name="umap_css", reduction.key="UMAPCSS_")
+
+```
+
+```{r cluster mural cells}
+
+mural <- FindNeighbors(mural, graph.name=c("RNA_css_nn","RNA_css_snn"), reduction="csspca", dims=1:20) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.1) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.15) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.2) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.4) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=0.8) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=1) %>%
+          FindClusters(graph.name="RNA_css_snn", resolution=1.5)
+
+p1 <- DimPlot(mural, reduction="umap_css", group.by="condition") & NoAxes() 
+p2 <- DimPlot(mural, reduction="umap_css", group.by="RNA_css_snn_res.0.15", label=T) & NoAxes() & NoLegend()
+(p1|p2)
+
+
+
+cols_cl_mural <- c("#F7DC6F", "#F2CA27", "#D3AC0D", "#AB8B0A", "#876E08")
+levels_mural_res.0.15 <- c(4,0,1,3,2)
+mural$RNA_css_snn_res.0.15 <- factor(mural$RNA_css_snn_res.0.15, levels=levels_mural_res.0.15)
+
+pdf("Plots/Mural_umap_css_by_cluster.pdf", width = 4, height = 4)
+plotFeature(Embeddings(mural, "umap_css"), mural$RNA_css_snn_res.0.15, do_label = F, label_round = T, cex.label = 1.2, colorPal= cols_cl_mural, cex=0.7, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+png("Plots/Mural_umap_css_by_cluster_labeled.png", width = 3000, height = 3000,res=500)
+plotFeature(Embeddings(mural, "umap_css"), mural$RNA_css_snn_res.0.15, do_label = F, label_round = T, cex.label = 1.2, colorPal= cols_cl_mural, cex=0.7, pt_border = T, lwd_border = 0.1)
+dev.off()
+
+png("Plots/Mural_umap_css_by_cluster.png", width = 3000, height = 3000,res=500)
+DimPlot(mural, reduction="umap_css", group.by = "RNA_css_snn_res.0.15", cols = cols_cl_mural) & NoAxes() 
+dev.off()
+
+```
+
+```{r save mural object}
+
+saveRDS(mural, "Objects/diabetes_css_integrated_seurat_mural.rds")
+
+```

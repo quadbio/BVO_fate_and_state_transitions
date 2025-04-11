@@ -1,0 +1,1690 @@
+---
+title: "Diabetes analysis"
+author: "Marina Nikolova"
+date: "23/01/2023"
+output: html_document
+---
+
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwd () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SeuratWrappers)
+library(ggrepel)
+library(simspec)
+library(ggrepel)
+library(uwot)
+library(devtools)
+#install_github('immunogenomics/presto')
+library(presto)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+```
+
+
+Load data
+```{r load seurat object}
+
+# All cells
+seurat <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/Objects/diabetes_css_integrated_seurat.rds")
+
+# Endothelial cells
+ec <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/Objects/diabetes_css_integrated_seurat_endothelial.rds")
+
+# Mural cells
+mural <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/Objects/diabetes_css_integrated_seurat_mural.rds")
+
+write.csv(VariableFeatures(ec), "Plots/variable_features_EC.csv")
+write.csv(VariableFeatures(mural), "Plots/variable_features_mural.csv")
+
+```
+
+
+#### Set levels an colors
+```{r set levels and colors of all cells}
+
+conditions <- c("Control","Inflammatory","Diabetic")
+cols_cond <- c("#5293CC", "#ABC12B", "#E14730")
+seurat$condition <- factor(seurat$condition, levels=conditions)
+      
+res.0.35_levels <- c(8,9,10,5,6,4,11,3,7,0,1,2)
+cols_cl <- c("#F5B7B1","#EB6F63","#D44637","#B03A2E", "#F7DC6F", "#F4D145", "#F1C71C", "#E0B60D", "#C7A20C", "#B08F0A", "#9B7E09", "#876E08")
+seurat$RNA_css_snn_res.0.35 <- factor(seurat$RNA_css_snn_res.0.35, levels=res.0.35_levels)
+
+```
+
+
+
+# Differential abundace with Milo
+
+## MiloR on all cells
+
+Milo is a tool for analysis of complex single cell datasets generated from replicated multi-condition experiments, which detects changes in composition between conditions. While differential abundance (DA) is commonly quantified in discrete cell clusters, Milo uses partally overlapping neighbourhoods of cells on a KNN graph. Starting from a graph that faithfully recapitulates the biology of the cell population, Milo analysis consists of 3 steps:
+
+Sampling of representative neighbourhoods
+Testing for differential abundance of conditions in all neighbourhoods
+Accounting for multiple hypothesis testing using a weighted FDR procedure that accounts for the overlap of neighbourhoods
+
+#### Prepare environment and objects
+```{r prepare the environment}
+
+# BiocManager::install("miloR")
+# citation("miloR")
+
+library(miloR)
+library(SingleCellExperiment)
+library(scater)
+library(dplyr)
+library(patchwork)
+
+```
+
+Convert the seurat object into a single cell experiemtn object. Then convert the SCE further to an extended SCE object class that can store the information about neighborhoods on the kNN graph, a Milo object.
+```{r convert Seurat object into SCE and into Milo objects}
+
+Idents(seurat) <- "orig.ident"
+seurat_sce <- as.SingleCellExperiment(seurat)
+seurat_milo <- Milo(seurat_sce)
+
+```
+
+Generate a kNN graph.
+This is stored in the graph slot, in igraph format. The miloR package includes functionality to build and store the graph from the PCA dimensions stored in the reducedDim slot.
+```{r kNN graph construction}
+
+seurat_milo <- buildGraph(seurat_milo, k = 60, d = 30)
+
+```
+
+#### Define representative neighborhoods sl
+
+The neighborhood of a cells i defined as the group of cells connected by an edge in the kNN graph ot the index cell. 
+For efficiency, Milo doesn't test for DA in the neighborhood of every cell, but samples as indices a subset of representative cells, using a kNN sampling algorithm used by Gut et al (2015).
+```{r sampling}
+
+# For sampling you need to define a few parameters:
+# - prop: the proportion of cells to randomly sample to start with (usually 0.1 - 0.2 is sufficient)
+# - k: the k to use for KNN refinement (we recommend using the same k used for KNN graph building)
+# - d: the number of reduced dimensions to use for KNN refinement (we recommend using the same d used for KNN graph building)
+# - refined indicated whether you want to use the sampling refinement algorith, or just pick cells at random. The default and recommended way to go is to use refinement. The only situation in which you might consider using random instead, is if you have batch corrected your data with a graph based correction algorithm, such as BBKNN, but the results of DA testing will be suboptimal.
+
+seurat_milo <- makeNhoods(seurat_milo, prop = 0.3, k = 60, d=30, refined = TRUE)
+
+# Check the size of neighborhoods as this affects the power of DA testing
+plotNhoodSizeHist(seurat_milo)
+# Empirically, the authors found it’s best to have a distribution peaking between 50 and 100, or at least to have a distribution peaking above 20. 
+# Otherwise you might consider rerunning makeNhoods increasing k and/or prop.
+
+```
+
+
+Count how many cells from each sample are in each neighbourhood.
+Milo leverages the variation in cell numbers between replicates for the same experimental condition to test for differential abundance. Therefore we have to count how many cells from each sample are in each neighbourhood. We need to use the cell metadata and specify which column contains the sample information.
+
+```{r count cells in neighborhoods}
+
+seurat_milo <- countCells(seurat_milo, meta.data = data.frame(colData(seurat_milo)), sample="orig.ident")
+
+# This adds to the Milo object a 𝑛×𝑚 matrix, where 𝑛 is the number of neighbourhoods and 𝑚 is the number of experimental samples. Values indicate the number of cells from each sample counted in a neighbourhood. This count matrix will be used for DA testing.
+head(nhoodCounts(seurat_milo))
+
+```
+
+
+#### Differential abundance testing
+
+Now we are all set to test for differential abundance in neighbourhoods. We implement this hypothesis testing in a generalized linear model (GLM) framework, specifically using the Negative Binomial GLM implementation in edgeR.
+
+We first need to think about our experimental design. The design matrix should match each sample to the experimental condition of interest for DA testing.
+
+```{r define experimental design}
+
+seurat_design <- data.frame(colData(seurat_milo))[,c("orig.ident", "condition")]
+## Convert batch info from integer to factor
+seurat_design <- distinct(seurat_design)
+rownames(seurat_design) <- seurat_design$orig.ident
+
+seurat_design
+
+```
+
+
+```{r DA testing}
+
+seurat_milo <- calcNhoodDistance(seurat_milo, d=30)
+
+seurat_design$condition <- factor(seurat_design$condition, levels = c("Control","Inflammatory","Diabetic"))
+da_results <- testNhoods(seurat_milo, design = ~ condition, design.df = seurat_design)
+
+da_results %>%
+  arrange(- SpatialFDR) %>%
+  head()
+
+# Inspect the distribution of uncorrected P values, to verify that the test was balanced
+pdf("Plots/histo_da_results_miloR_k60_prop0.3.pdf", width = 10, height = 7)
+ggplot(da_results, aes(PValue)) + geom_histogram(bins=50) + theme_classic()
+dev.off()
+
+# Visualize the test results with a volcano plot (each point here represents a neighbourhood, not a cell)
+pdf("Plots/volcano_da_results_miloR_k60_prop0.3.pdf", width = 5, height = 3.5)
+ggplot(da_results, aes(logFC, -log10(SpatialFDR))) +
+  geom_point(colour = "grey", alpha = 0.5, size = 0.8) +
+  geom_point(data = filter(da_results, -log10(SpatialFDR) > 1), size = 1.2,shape = 21,fill = "black",colour = "black") + 
+  theme_classic()
+  # geom_hline(yintercept = 1) ## Mark significance threshold (10% FDR)
+dev.off()
+  
+```
+
+
+To visualize DA results relating them to the embedding of single cells, we can build an abstracted graph of neighbourhoods that we can superimpose on the single-cell embedding. Here each node represents a neighbourhood, while edges indicate how many cells two neighbourhoods have in common. Here the layout of nodes is determined by the position of the index cell in the UMAP embedding of all single-cells. The neighbourhoods displaying singificant DA are colored by their log-Fold Change.
+
+```{r visualize}
+
+seurat_milo <- buildNhoodGraph(seurat_milo, overlap = 100)
+
+## Plot neighbourhood graph
+nh_graph_pl <- plotNhoodGraphDA(seurat_milo, da_results, layout="UMAP_CSS",alpha=0.1) 
+
+da_results <- annotateNhoods(seurat_milo, da_results, coldata_col = "RNA_css_snn_res.0.35")
+head(da_results)
+
+nh_graph_pl$data <- nh_graph_pl$data %>% arrange(abs(colour_by))
+
+# While neighbourhoods tend to be homogeneous, we can define a threshold for celltype_fraction to exclude neighbourhoods that are a mix of cell types.
+ggplot(da_results, aes(RNA_css_snn_res.0.35_fraction)) + geom_histogram(bins=50)
+da_results$RNA_css_snn_res.0.35 <- ifelse(da_results$RNA_css_snn_res.0.35_fraction < 0.5, "Overlapping", da_results$RNA_css_snn_res.0.35)
+
+
+pdf("Plots/plotDAbeeswarm_miloR_diab_to_ctrl_k60_prop0.35.pdf", width = 4, height = 10)
+plotDAbeeswarm(da_results, group.by = "RNA_css_snn_res.0.35") + theme_classic() +scale_color_gradient2(high = c("#F9B99D","#B5202D"), low = c("#2468AD","#9EC6DF"))
+dev.off()
+
+pdf("Plots/umap_miloR_diab_to_ctrlk60_prop0.35.pdf", width = 8, height = 4.5)
+nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+pdf("Plots/umap_miloR_by_neighborhood_diab_to_ctrl_k60_prop0.35.pdf", width = 6, height = 4.5)
+plotNhoodGraph(seurat_milo, colour_by =  "RNA_css_snn_res.0.3", layout="UMAP_CSS") 
+dev.off()
+
+png("Plots/umap_miloR_diab_to_ctrl_k60_prop0.35.png", width = 2700, height = 1750, res = 500)
+nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+png("Plots/umap_miloR_diab_to_ctrl_org_colscheme_k60_prop0.35.png", width = 2700, height = 1750, res = 500)
+nh_graph_pl + plot_layout(guides="collect") 
+dev.off()
+
+```
+
+```{r save miloR on all cells}
+
+saveRDS(seurat_milo, "Objects/diabetes_object_milo_diab_to_ctrl_k60_prop0.3.rds")
+saveRDS(da_results, "Objects/diabetes_object_milo_diab_to_ctrl_k60_prop0.3.rds")
+
+```
+
+```{r milo on all cells inflamatory vs ctrl}
+
+# To compare the DA of inflammatory vs control conditions, the following contrastt was used:
+# contrast.1 <- c("conditionInflammatory - conditionControl") # the syntax is <VariableName><ConditionLevel> - <VariableName><ControlLevel>
+# seurat_milo2 <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/Objects/diabetes_object_milo_infl_to_ctrl_k60_prop0.3.rds")
+# da_results2 <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/Objects/diabetes_da_results_milo_infl_to_ctrl_k60_prop0.3.rds")
+
+seurat_milo2 <- buildNhoodGraph(seurat_milo2, overlap = 100)
+
+## Plot neighbourhood graph
+nh_graph_pl <- plotNhoodGraphDA(seurat_milo2, da_results2, layout="UMAP_CSS",alpha=0.1) 
+
+da_results2 <- annotateNhoods(seurat_milo2, da_results2, coldata_col = "RNA_css_snn_res.0.35")
+head(da_results2)
+
+nh_graph_pl$data <- nh_graph_pl$data %>% arrange(abs(colour_by))
+
+# While neighbourhoods tend to be homogeneous, we can define a threshold for celltype_fraction to exclude neighbourhoods that are a mix of cell types.
+ggplot(da_results2, aes(RNA_css_snn_res.0.35_fraction)) + geom_histogram(bins=50)
+da_results2$RNA_css_snn_res.0.35 <- ifelse(da_results2$RNA_css_snn_res.0.35_fraction < 0.5, "Overlapping", da_results2$RNA_css_snn_res.0.35)
+
+
+pdf("Plots/plotDAbeeswarm_miloR_infl_to_ctrl_k60_prop0.35.pdf", width = 4, height = 10)
+plotDAbeeswarm(da_results2, group.by = "RNA_css_snn_res.0.35") + theme_classic() +scale_color_gradient2(high = c("#F9B99D","#B5202D"), low = c("#2468AD","#9EC6DF"))
+dev.off()
+
+pdf("Plots/umap_miloR_infl_to_ctrl_k60_prop0.35.pdf", width = 8, height = 4.5)
+nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+pdf("Plots/umap_miloR_by_neighborhood_infl_to_ctrl_k60_prop0.35.pdf", width = 6, height = 4.5)
+plotNhoodGraph(seurat_milo2, colour_by =  "RNA_css_snn_res.0.3", layout="UMAP_CSS") 
+dev.off()
+
+png("Plots/umap_miloR_infl_to_ctrl_k60_prop0.35.png", width = 2700, height = 1750, res = 500)
+nh_graph_pl + plot_layout(guides="collect") +scale_fill_distiller(type = "div",palette = 5,direction = -1)
+dev.off()
+
+png("Plots/umap_miloR_infl_to_ctrl_org_colscheme_k60_prop0.35.png", width = 2700, height = 1750, res = 500)
+nh_graph_pl + plot_layout(guides="collect") 
+dev.off()
+
+```
+```{r milo on all cells diabetic vs inflammatory}
+
+# To compare the DA of diabetic vs inflammatory conditions, the following contrastt was used:
+# contrast.1 <- c("conditionDiabetic - conditionInflammatory") # the syntax is <VariableName><ConditionLevel> - <VariableName><ControlLevel>
+# seurat_milo3 <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/Objects/diabetes_object_milo_diab_to_infl_k60_prop0.3.rds")
+# da_results3 <- readRDS("/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/Objects/diabetes_da_results_milo_diab_to_infl_k60_prop0.3.rds")
+
+# No significant DA was calculated
+
+```
+
+# Find cluster markers
+```{r find cluster markers res.0.35}
+
+Idents(seurat) <- "RNA_css_snn_res.0.35"
+
+table(seurat$orig.ident, seurat$RNA_css_snn_res.0.35)
+
+cl_markers_res.0.35 <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers_res.0.35 <- cl_markers_res.0.35 %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers_res.0.35 <- cl_markers_res.0.35 %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers_res.0.35 <- cl_markers_res.0.35 %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.35 <- cl_markers_res.0.35 %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.35 <- cl_markers_res.0.35 %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.35, "Plots/top_cl_markers_res.0.35.csv")
+write.csv(top50_cl_markers_res.0.35, "Plots/top50_cl_markers_res.0.35.csv")
+
+top_cl_markers_unique <- top5_cl_markers_res.0.35[!duplicated(top5_cl_markers_res.0.35[ , "gene"]), ]  # Delete rows
+top2_cl_markers_unique <- top_cl_markers_unique %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+
+# Remove mitochondria and ribosome genes from the list
+blacklist <- c(grep("^MT-", cl_markers_res.0.35$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(cl_markers_res.0.35$gene, blacklist)
+cl_markers_res.0.35_no_MT_RP <- cl_markers_res.0.35 %>% filter(gene %in% diff_genes)
+nrow(cl_markers_res.0.35_no_MT_RP)
+
+# Redo top marker selection
+top2_cl_markers_res.0.35_no_MT_RP <- cl_markers_res.0.35_no_MT_RP %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC) 
+top5_cl_markers_res.0.35_no_MT_RP <- cl_markers_res.0.35_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC) 
+top10_cl_markers_res.0.35_no_MT_RP <- cl_markers_res.0.35_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers_res.0.35_no_MT_RP <- cl_markers_res.0.35_no_MT_RP %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers_res.0.35_no_MT_RP <- cl_markers_res.0.35_no_MT_RP %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers_res.0.35_no_MT_RP, "Plots/top_cl_markers_res.0.35_no_MT_RP.csv")
+write.csv(top50_cl_markers_res.0.35_no_MT_RP, "Plots/top50_cl_markers_res.0.35_no_MT_RP.csv")
+
+```
+
+
+#### Plot cluster markers
+
+```{r heatmap top markers by cluster res.0.4, fig.height=7, fig.width=4}
+
+Idents(seurat) <- "RNA_css_snn_res.0.35"
+levels(seurat) <- res.0.35_levels
+seurat$RNA_css_snn_res.0.35 <- factor(seurat$RNA_css_snn_res.0.35, levels=res.0.35_levels)
+
+top2_cl_markers_unique <- top2_cl_markers_unique %>% arrange(factor(cluster, levels=res.0.35_levels))
+
+
+library(gplots)
+avg_cond_cl <- sapply(levels(seurat$RNA_css_snn_res.0.35), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_css_snn_res.0.35==x)]))
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+mat_norm <- apply(avg_cond_cl[top2_cl_markers_unique$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- top2_cl_markers_unique$gene
+mat_norm <- mat_norm[,col.order]
+
+pdf("Plots/heatmap_scaled_top2_markers_cl_res.0.35.pdf", width = 5, height = 14)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col = greyscale_colscheme(30), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+```{r cell proportions within mural clusters}
+
+pdf("Plots/cell_prop_RNA_of_cluster_per_condition.pdf", width = 8, height = 7)
+df <- as.data.frame(table(seurat$RNA_css_snn_res.0.35, seurat$condition))
+colnames(df)[which(names(df) == "Var1")] <- "RNA_css_snn_res.0.35"
+colnames(df)[which(names(df) == "Var2")] <- "condition"
+
+ggplot(df, aes(fill=factor(RNA_css_snn_res.0.35), y=Freq, x=condition)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Condition") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values= cols_cl) +
+    theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))  + 
+    labs(fill='Cluster') 
+dev.off()
+
+
+# prepare a data frame for the box plot
+df <- as.data.frame(table(seurat$orig.ident, seurat$RNA_css_snn_res.0.35))
+colnames(df)[which(names(df) == "Var1")] <- "orig.ident"
+colnames(df)[which(names(df) == "Var2")] <- "RNA_css_snn_res.0.35"
+df <- df %>% mutate(condition = rep(c("Control", "Control", "Inflammatory", "Inflammatory", "Inflammatory", "Diabetic", "Diabetic", "Diabetic"), 12))
+ df %>% mutate(replicate = rep(c("1", "2", "1", "2", "3", "1", "2", "3"), 12))
+ 
+table(seurat$orig.ident)
+# Since there are different numbers of cells per sample, present the proportion of each sample instead of total cell count
+df <- df %>% mutate(total = rep(c(10086, 6383, 5651, 4205, 5903, 2954, 4430, 551), 12))
+df <- df %>% mutate(proportion = Freq/total)
+
+df$condition <- factor(x = df$condition , levels = conditions)
+
+pdf("Plots/cell_prop_RNA_of_condition_per_cluster_boxplot.pdf", width = 7, height = 7.5)
+ggplot(df, aes(x=RNA_css_snn_res.0.35, y=proportion, fill=factor(condition))) + 
+    geom_boxplot() +
+    scale_fill_manual(values= cols_cond) +
+    geom_point(aes(fill = condition), size = 0.4, shape = 21, position = position_jitterdodge()) +
+    facet_wrap(~RNA_css_snn_res.0.35, scale="free") +
+    theme_classic()
+dev.off()
+
+```
+
+
+#### Plot marker genes
+```{r plot clusters and popular genes}
+
+markers <- c("CLDN5", "MECOM", "PECAM1","KDR", "GJA4","CXCR4", "APLNR", "NR2F2",
+             "PDGFRB","CSPG4", "ACTA2","DCN", "IGFBP5", "COL1A1", "DLK1", "LUM", "ICAM1", "CCL2")
+
+png("Plots/featureplots.png", width = 6000, height = 2600, res=500)
+plotMultiFeatures(Embeddings(seurat, "umap_css"),
+                  seurat@assays$RNA@data[markers,],
+                  ncol=6, colorPal=blue_colscheme, cex=0.5, par_cex = 0.8, mar = c(1,1,2,2), cex.main=1, sort_by_value=T)
+dev.off()
+
+diab_markers <- c("FN1","COL15A1","COL1A1","COL5A1","CCL2","CXCL12","IL32","HLA-B")
+
+png("Plots/featureplots_diab_markers.png", width = 6000, height = 1734, res=500)
+plotMultiFeatures(Embeddings(seurat, "umap_css"),
+                  seurat@assays$RNA@data[diab_markers,],
+                  ncol=6, colorPal=blue_colscheme, cex=0.5, par_cex = 0.8, mar = c(1,1,2,2), cex.main=1, sort_by_value=T)
+dev.off()
+
+```
+
+
+
+# DE analysis
+
+## Wilcoxon rank sum test
+```{r wilcoxon test all clusters separately RNA_css_snn_res.0.35}
+
+Idents(seurat) <- "condition"
+seurat_diab_ctrl <- subset(seurat, idents = "Inflammatory", invert = T)
+# Split seurat object into a list based on the cluster in RNA_css_snn_res.0.35
+seurat.clusters <- SplitObject(seurat_diab_ctrl, split.by = "RNA_css_snn_res.0.35")
+
+# Generate a list of data frames with DEGs
+seurat_de_tab <- lapply(seurat.clusters, function(cl){
+  seurat_de_tab <- wilcoxauc(cl, group_by = "condition") %>%
+    filter(group == "Diabetic") %>%
+    mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+    mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))%>% 
+    mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated", logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated", TRUE ~ "Unchanged"))
+  blacklist <- c(grep("^MT-", seurat_de_tab$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+  diff_genes <- setdiff(seurat_de_tab$feature,blacklist)
+  seurat_de_tab <- seurat_de_tab %>% filter(feature %in% diff_genes)
+})
+
+seurat_de_tab <- seurat_de_tab[c("8","9","10","5","6","4","11","3","7","0","1","2")]
+
+# Add number of DEGs 
+seurat_no.up <- c()
+seurat_no.down <- c()
+for (i in seurat_de_tab) {
+  seurat_no.up <- rbind(seurat_no.up, sum(i$outcome == "Up-regulated"))
+  seurat_no.down <- rbind(seurat_no.down, sum(i$outcome ==  "Down-regulated"))
+}
+
+# Createa a table with no. DEGs
+seurat_no.DEGs <- matrix(c("8","9","10","5","6","4","11","3","7","0","1","2"), ncol=1, byrow=TRUE)
+seurat_no.DEGs <- as.data.frame(seurat_no.DEGs)
+colnames(seurat_no.DEGs) <- c("cluster")
+
+seurat_no.DEGs$no.up <- seurat_no.up
+seurat_no.DEGs$no.down <- seurat_no.down
+seurat_no.DEGs$no.total <- seurat_no.down + seurat_no.up
+seurat_no.DEGs$no.cells <- as.integer(table(seurat_diab_ctrl$RNA_css_snn_res.0.35))
+seurat_no.DEGs <- seurat_no.DEGs[order(-seurat_no.DEGs$no.total),] 
+seurat_no.DEGs$cluster <- factor(seurat_no.DEGs$cluster,levels =seurat_no.DEGs$cluster)
+rownames(seurat_no.DEGs) <- seurat_no.DEGs$cluster
+
+# Define colors
+cols_cl_deg <- c("#D44637","#F5B7B1","#C7A20C","#876E08","#9B7E09","#E0B60D","#B03A2E","#B08F0A","#F7DC6F","#F4D145","#EB6F63","#F1C71C")
+
+# Plot 
+pdf("Plots/seurat_cl_lollipop_DEGs_diab_vs_ctrl_up.pdf", height = 3, width = 5)
+ggplot(seurat_no.DEGs, aes(x = cluster, y = no.up)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.up), col = cols_cl_deg) +
+  geom_point(aes(x=cluster, y=no.up), size = 8, col = cols_cl_deg) +
+  geom_text(aes(x=cluster,  y=no.up, label = no.up), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of up-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/seurat_cl_lollipop_DEGs_diab_vs_ctrl_down.pdf", height = 3, width = 5)
+ggplot(seurat_no.DEGs, aes(x = cluster, y = no.down)) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.down), col = cols_cl_deg) +
+  geom_point(aes(x=cluster, y=no.down), size = 8, col = cols_cl_deg) +
+  geom_text(aes(x=cluster,  y=no.down, label = no.down), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of down-regulated DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/seurat_cl_lollipop_DEGs_diab_vs_ctrl_total.pdf", height = 2, width = 4)
+ggplot(seurat_no.DEGs, aes(x = cluster), y = no.total) +
+  geom_segment(aes(x = cluster, xend = cluster, y = 0, yend = no.total), col = "gray50") +
+  geom_point(aes(x=cluster, y=no.total, size = no.cells), col = cols_cl_deg) +
+  theme_classic() +
+  xlab("Cluster") + 
+  ylab("Number of DEGs") +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+write.csv(seurat_de_tab, "Plots/seurat_DE_wilcoxauc_diab_vs_ctrl_all_cl_separately.csv") # Cluster order is 10 8 7 2 1 3 5 0 6 4 9 11
+# sapply(names(de_tab), 
+#  function (x) write.csv(de_tab[[x]], file=paste("Plots/EC_DE_wilcoxauc_",x, ".csv")))
+
+```
+
+```{r wicoxon test on mural cells}
+
+Idents(mural) <- "condition"
+markers_mural_diab <- FindMarkers(object = mural, ident.1 = "Diabetic", ident.2 = "Control", min.pct = 0.2, logfc.threshold =0)
+markers_mural_infl <- FindMarkers(object = mural, ident.1 = "Inflammatory", ident.2 = "Control", min.pct = 0.2, logfc.threshold = 0)
+
+
+# Filter
+DE_wilcoxauc_mural_diab <- markers_mural_diab  %>%
+  mutate(gene = rownames(markers_mural_diab)) %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.1) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.01, gene, NA))
+
+DE_wilcoxauc_mural_infl <- markers_mural_infl  %>%
+  mutate(gene = rownames(markers_mural_infl)) %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.1) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.01, gene, NA))
+
+
+# Add to the table another column with outcome
+DE_wilcoxauc_mural_diab <- DE_wilcoxauc_mural_diab %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.01 ~ "Up-regulated",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+DE_wilcoxauc_mural_infl <- DE_wilcoxauc_mural_infl %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.01 ~ "Up-regulated",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_mural_diab$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_mural_diab <- setdiff(DE_wilcoxauc_mural_diab$gene,blacklist)
+DE_wilcoxauc_mural_diab <- DE_wilcoxauc_mural_diab %>% filter(gene %in% diff_genes_mural_diab)
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_mural_infl$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_mural_infl <- setdiff(DE_wilcoxauc_mural_infl$gene,blacklist)
+DE_wilcoxauc_mural_infl <- DE_wilcoxauc_mural_infl %>% filter(gene %in% diff_genes_mural_infl)
+
+
+
+write.csv(DE_wilcoxauc_mural_diab, "Plots/DE_wilcoxauc_mural_diab_vs_ctrl.csv")
+# DE_wilcoxauc_mural_diab<-read.csv("Plots/DE_wilcoxauc_mural_diab_vs_ctrl.csv", row.names = 1)
+write.csv(DE_wilcoxauc_mural_infl, "Plots/DE_wilcoxauc_mural_infl_vs_ctrl.csv")
+# DE_wilcoxauc_mural_infl<-read.csv( "Plots/DE_wilcoxauc_mural_infl_vs_ctrl.csv", row.names = 1)
+
+
+# In order to combined both data frames (diabetic and inflammatory), we first add the missing genes in both data frames
+missing_mural_diab <- data.frame(p_val = 0, avg_log2FC = 0, pct.1 = 0, pct.2 = 0, p_val_adj = 0, gene = setdiff(DE_wilcoxauc_mural_infl$gene, DE_wilcoxauc_mural_diab$gene), DE = 0, DEG = 0, outcome = "Unchanged")
+rownames(missing_mural_diab) <- missing_mural_diab$gene
+DE_wilcoxauc_mural_diab <- rbind(DE_wilcoxauc_mural_diab, missing_mural_diab)
+
+missing_mural_infl <- data.frame(p_val = 0, avg_log2FC = 0, pct.1 = 0, pct.2 = 0, p_val_adj = 0, gene = setdiff(DE_wilcoxauc_mural_diab$gene, DE_wilcoxauc_mural_infl$gene), DE = 0, DEG = 0, outcome = "Unchanged")
+rownames(missing_mural_infl) <- missing_mural_infl$gene
+DE_wilcoxauc_mural_infl <- rbind(DE_wilcoxauc_mural_infl, missing_mural_infl)
+
+# Now we join the two data frames by gene
+DE_wilcoxauc_mural_diab_infl <- DE_wilcoxauc_mural_diab %>% full_join(DE_wilcoxauc_mural_infl, by = join_by(gene))
+
+write.csv(DE_wilcoxauc_mural_diab_infl, "Plots/DE_wilcoxauc_mural_diab_infl_both_vs_control.csv")
+
+corr_mural <- cor(DE_wilcoxauc_mural_diab_infl$avg_log2FC.x, DE_wilcoxauc_mural_diab_infl$avg_log2FC.y, method="pearson")
+
+# Plot with selected labels
+mural_deg <- c("TAGLN","ACTA2","IGFBP7","COL1A1","TGFBI","COL4A1","COL5A1","FN1","CXCL12","CCL2","PLCG2",
+                "REN","FOS","BST2","IGFBP5","KL2","CHODL"  )
+# Filter them from the data frame
+mural_deg <- DE_wilcoxauc_mural_diab_infl %>% filter(gene %in% mural_deg)
+
+
+pdf("Plots/DE_wilcoxauc_mural_diab_infl.pdf", height = 5, width = 5)
+ggplot(DE_wilcoxauc_mural_diab_infl, aes(x = avg_log2FC.x, y = avg_log2FC.y,label=gene)) +
+  geom_point(colour = "black", fill= "black", size = 1) +
+  geom_point(data =  mural_deg, size = 2,shape = 21,fill = "#B03A2E",colour = "#B03A2E")+
+  geom_text_repel(data = mural_deg, mapping = aes( avg_log2FC.x, avg_log2FC.y, label = gene), size = 3, max.overlaps = 50)+
+  theme_classic() + 
+  geom_vline(xintercept=c(-1,0,1),  linetype="dotted") +
+  geom_hline(yintercept=c(-1,0,1),  linetype="dotted") +
+  ylim(-2.3,2.3) +
+  xlim(-2.3,2.3) +
+  xlab(expression("log"[2]*"FC in mural cells (diabetic vs. control)")) + 
+  ylab(expression("log"[2]*"FC in mural cells (inflammatory vs. control)"))
+dev.off()
+
+DE_wilcoxauc_mural_diab_infl %>% slice_max(n = 50, order_by = avg_log2FC.x) 
+DE_wilcoxauc_mural_diab_infl %>% slice_max(n = 50, order_by = avg_log2FC.y) 
+
+```
+
+```{r GO of mural diabetes and inflamamtory high and low genes}
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+filtered_mural_DE_up <- DE_wilcoxauc_mural_diab_infl %>% filter(outcome.x == "Up-regulated" & outcome.y == "Up-regulated")
+filtered_mural_DE_up$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=filtered_mural_DE_up$gene,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+  
+filtered_mural_DE_down <- DE_wilcoxauc_mural_diab_infl %>% filter(outcome.x == "Down-regulated" & outcome.y == "Down-regulated")
+filtered_mural_DE_down$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=filtered_mural_DE_down$gene,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+filtered_mural_DE_up_GO_MF <- enrichGO(gene = filtered_mural_DE_up$entrez_id, OrgDb = org.Hs.eg.db, keyType  = 'ENTREZID', ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.05,  qvalueCutoff = 0.05)
+filtered_mural_DE_down_GO_MF <- enrichGO(gene = filtered_mural_DE_down$entrez_id, OrgDb = org.Hs.eg.db, keyType  = 'ENTREZID', ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.05,  qvalueCutoff = 0.05)
+
+pdf("Plots/GO_MF_mural_cells_diab_infl_upregualted.pdf")
+y <- arrange(filtered_mural_DE_up_GO_MF, desc(Count)) %>% 
+        slice(1:30)
+ggplot(y, aes(Count, fct_reorder(Description, Count), fill=p.adjust), showCategory=10) + 
+    geom_col(orientation='y') + 
+    scale_fill_continuous(high = c("#6E6E6E","#B2B2B2"), low = c("#252525","#676767"), guide=guide_colorbar(reverse=TRUE)) + 
+    theme_minimal() + ylab(NULL) 
+dev.off()
+
+pdf("Plots/GO_MF_mural_cells_diab_infl_downregualted.pdf")
+x <- arrange(filtered_mural_DE_down_GO_MF, desc(Count)) %>% 
+        slice(1:30)
+ggplot(x, aes(Count, fct_reorder(Description, Count), fill=p.adjust), showCategory=10) + 
+    geom_col(orientation='y') + 
+    scale_fill_continuous(high = c("#6E6E6E","#B2B2B2"), low = c("#252525","#676767"), guide=guide_colorbar(reverse=TRUE)) + 
+    theme_minimal() + ylab(NULL)
+dev.off()
+
+```
+
+```{r GO of mural diabetes cl 3,7,1,2 high genes}
+
+Idents(seurat) <- "RNA_css_snn_res.0.35"
+mural_subs <- subset(seurat, idents = c(3,7,1,2))
+Idents(mural_subs) <- "condition"
+markers_mural_diab_subs <- FindMarkers(object = mural_subs, ident.1 = "Diabetic", ident.2 = "Control", min.pct = 0.2, logfc.threshold =0)
+DE_wilcoxauc_mural_diab_subs <- markers_mural_diab_subs  %>%
+  mutate(gene = rownames(markers_mural_diab_subs)) %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.1) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.01, gene, NA))
+DE_wilcoxauc_mural_diab_subs <- DE_wilcoxauc_mural_diab_subs %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.01 ~ "Up-regulated",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+blacklist <- c(grep("^MT-", DE_wilcoxauc_mural_diab_subs$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_mural_diab_subs <- setdiff(DE_wilcoxauc_mural_diab_subs$gene,blacklist)
+DE_wilcoxauc_mural_diab_subs <- DE_wilcoxauc_mural_diab_subs %>% filter(gene %in% diff_genes_mural_diab_subs)
+
+
+genes_mural_subs <- DE_wilcoxauc_mural_diab_subs %>% filter(outcome == "Up-regulated")
+genes_mural_subs$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=genes_mural_subs$gene,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+  
+genes_mural_subs
+ego_mural_subs <- enrichGO(gene       = genes_mural_subs$entrez_id,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(ego_mural_subs)
+
+enrichplot::dotplot(ego_mural_subs, showCategory = 20) +  
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+
+```
+
+```{r wicoxon test on endothelial cells}
+
+Idents(ec) <- "condition"
+markers_ec_diab <- FindMarkers(object = ec, ident.1 = "Diabetic", ident.2 = "Control", min.pct = 0.2, logfc.threshold = 0)
+markers_ec_infl <- FindMarkers(object = ec, ident.1 = "Inflammatory", ident.2 = "Control", min.pct = 0.2, logfc.threshold = 0)
+
+
+# Filter
+DE_wilcoxauc_ec_diab <- markers_ec_diab %>%
+  mutate(gene = rownames(markers_ec_diab)) %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.1) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.01, gene, NA))
+
+DE_wilcoxauc_ec_infl <- markers_ec_infl %>%
+  mutate(gene = rownames(markers_ec_infl)) %>%
+  mutate(DE = abs(avg_log2FC)>log(1.1) & p_val_adj < 0.1) %>%
+  mutate(DEG = ifelse(abs(avg_log2FC)>log(1.1) & p_val_adj < 0.01, gene, NA))
+
+
+# Add to the table another column with outcome
+DE_wilcoxauc_ec_diab <- DE_wilcoxauc_ec_diab %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.01 ~ "Up-regulated",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+DE_wilcoxauc_ec_infl <- DE_wilcoxauc_ec_infl %>% 
+  mutate(
+    outcome = case_when(avg_log2FC > log(1.1) & p_val_adj < 0.01 ~ "Up-regulated",
+                           avg_log2FC < -log(1.1) & p_val_adj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_ec_diab$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_ec_diab <- setdiff(DE_wilcoxauc_ec_diab$gene,blacklist)
+DE_wilcoxauc_ec_diab <- DE_wilcoxauc_ec_diab %>% filter(gene %in% diff_genes_ec_diab)
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_ec_infl$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_ec_infl <- setdiff(DE_wilcoxauc_ec_infl$gene,blacklist)
+DE_wilcoxauc_ec_infl <- DE_wilcoxauc_ec_infl %>% filter(gene %in% diff_genes_ec_infl)
+
+
+write.csv(DE_wilcoxauc_ec_diab, "Plots/DE_wilcoxauc_ec_diab_vs_ctrl.csv")
+write.csv(DE_wilcoxauc_ec_infl, "Plots/DE_wilcoxauc_ec_infl_vs_ctrl.csv")
+
+
+# In order to combined both data frames (diabetic and inflammatory), we first add the missing genes in both data frames
+missing_ec_diab <- data.frame(p_val = 0, avg_log2FC = 0, pct.1 = 0, pct.2 = 0, p_val_adj = 0, gene = setdiff(DE_wilcoxauc_ec_infl$gene, DE_wilcoxauc_ec_diab$gene), DE = 0, DEG = 0, outcome = "Unchanged")
+rownames(missing_ec_diab) <- missing_ec_diab$gene
+DE_wilcoxauc_ec_diab <- rbind(DE_wilcoxauc_ec_diab, missing_ec_diab)
+
+missing_ec_infl <- data.frame(p_val = 0, avg_log2FC = 0, pct.1 = 0, pct.2 = 0, p_val_adj = 0, gene = setdiff(DE_wilcoxauc_ec_diab$gene, DE_wilcoxauc_ec_infl$gene), DE = 0, DEG = 0, outcome = "Unchanged")
+rownames(missing_ec_infl) <- missing_ec_infl$gene
+DE_wilcoxauc_ec_infl <- rbind(DE_wilcoxauc_ec_infl, missing_ec_infl)
+
+# Now we join the two data frames by gene
+DE_wilcoxauc_ec_diab_infl <- DE_wilcoxauc_ec_diab %>% full_join(DE_wilcoxauc_ec_infl, by = join_by(gene))
+
+write.csv(DE_wilcoxauc_ec_diab_infl, "Plots/DE_wilcoxauc_ec_diab_infl_both_vs_control.csv")
+
+corr_ec <- cor(DE_wilcoxauc_ec_diab_infl$avg_log2FC.x, DE_wilcoxauc_ec_diab_infl$avg_log2FC.y, method="pearson")
+
+
+# Plot with selected labels
+ec_deg <- c("TM4SF1","TNFRSF10D","CYP1B1","F2R","FN1","CCL2","GJA5","ANGPT2","IL33","SFRP1","IGFBP7",
+            "DLK1", "IGFBP5","FOS","TAC1","APLNR","IGFBP3","SELENOP","HPGD")
+# Filter them from the data frame
+ec_deg <- DE_wilcoxauc_ec_diab_infl %>% filter(gene %in% ec_deg)
+
+pdf("Plots/DE_wilcoxauc_ec_diab_infl.pdf", heigh = 5, width = 5)
+ggplot(DE_wilcoxauc_ec_diab_infl, aes(x = avg_log2FC.x, y = avg_log2FC.y,label=gene)) +
+  geom_point(colour = "black", fill= "black",size = 1) +
+  geom_point(data =  ec_deg, size = 2,shape = 21,fill = "#B03A2E",colour = "#B03A2E")+
+  geom_text_repel(data = ec_deg, mapping = aes( avg_log2FC.x, avg_log2FC.y, label = gene), size = 3, max.overlaps = 50)+
+  theme_classic() + 
+  geom_vline(xintercept=c(-1,0,1),  linetype="dotted") +
+  geom_hline(yintercept=c(-1,0,1),  linetype="dotted") +
+  ylim(-1.5,1.5) +
+  xlim(-1.5,1.5) +
+  xlab(expression("log"[2]*"FC in ECs (diabetic vs. control)")) + 
+  ylab(expression("log"[2]*"FC in ECs (inflammatory vs. control)"))
+dev.off()
+
+DE_wilcoxauc_ec_diab_infl %>% slice_max(n = 50, order_by = avg_log2FC.x)
+DE_wilcoxauc_ec_diab_infl %>% slice_max(n = 50, order_by = avg_log2FC.y)
+
+```
+
+```{r GO of endothelial diabetes and inflamamtory high and low genes}
+
+filtered_ec_DE_up <- DE_wilcoxauc_ec_diab_infl %>% filter(outcome.x == "Up-regulated" & outcome.y == "Up-regulated")
+filtered_ec_DE_up$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=filtered_ec_DE_up$gene,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+  
+filtered_ec_DE_down <- DE_wilcoxauc_ec_diab_infl %>% filter(outcome.x == "Down-regulated" & outcome.y == "Down-regulated")
+filtered_ec_DE_down$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=filtered_ec_DE_down$gene,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+filtered_ec_DE_up_GO_MF <- enrichGO(gene = filtered_ec_DE_up$entrez_id, OrgDb = org.Hs.eg.db, keyType  = 'ENTREZID', ont = "CC", pAdjustMethod = "BH", pvalueCutoff = 0.05,  qvalueCutoff = 0.05)
+filtered_ec_DE_down_GO_MF <- enrichGO(gene = filtered_ec_DE_down$entrez_id, OrgDb = org.Hs.eg.db, keyType  = 'ENTREZID', ont = "CC", pAdjustMethod = "BH", pvalueCutoff = 0.05,  qvalueCutoff = 0.05)
+
+pdf("Plots/GO_MF_ec_cells_diab_infl_upregualted.pdf")
+y <- arrange(filtered_ec_DE_up_GO_MF, desc(Count)) %>% 
+        slice(1:30)
+ggplot(y, aes(Count, fct_reorder(Description, Count), fill=p.adjust), showCategory=10) + 
+    geom_col(orientation='y') + 
+    scale_fill_continuous(high = c("#6E6E6E","#B2B2B2"), low = c("#252525","#676767"), guide=guide_colorbar(reverse=TRUE)) + 
+    theme_minimal() + ylab(NULL) 
+dev.off()
+
+pdf("Plots/GO_MF_ec_cells_diab_infl_downregualted.pdf")
+x <- arrange(filtered_ec_DE_down_GO_MF, desc(Count)) %>% 
+        slice(1:30)
+ggplot(x, aes(Count, fct_reorder(Description, Count), fill=p.adjust), showCategory=10) + 
+    geom_col(orientation='y') + 
+    scale_fill_continuous(high = c("#6E6E6E","#B2B2B2"), low = c("#252525","#676767"), guide=guide_colorbar(reverse=TRUE)) + 
+    theme_minimal() + ylab(NULL)
+dev.off()
+
+```
+
+```{r GO of endothelial diabetes high genes}
+
+genes_ec <- DE_wilcoxauc_ec_diab %>% filter(outcome == "Up-regulated")
+genes_ec$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=genes_ec$gene,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+  
+genes_ec
+ego_ec <- enrichGO(gene       = genes_ec$entrez_id,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "MF",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(ego_ec)
+
+enrichplot::dotplot(ego_ec, showCategory = 20) +  
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+
+```
+
+
+```{r wicoxon test on cluster 1}
+
+Idents(seurat_diab_ctrl) <- "RNA_css_snn_res.0.35"
+cl1 <- subset(seurat_diab_ctrl, idents = c(1))
+
+# Run wilcoxon test
+DE_wilcoxauc_cl1 <- wilcoxauc(cl1, group_by = "condition") %>%
+  filter(group == "Diabetic") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_cl1 <- DE_wilcoxauc_cl1 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_cl1) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_cl1$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_cl1 <- setdiff(DE_wilcoxauc_cl1$feature,blacklist)
+DE_wilcoxauc_cl1 <- DE_wilcoxauc_cl1 %>% filter(feature %in% diff_genes_cl1)
+
+# plot
+pdf("Plots/cl1_volcano_DE_diab_vs_ctrl.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl1, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl1, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl1, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/cl1_volcano_DE_diab_vs_ctrl_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl1, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl1, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl1, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_cl1, "Plots/DE_wilcoxauc_cl1_diab_vs_ctrl.csv")
+
+```
+
+```{r wicoxon test on cluster 8}
+
+Idents(seurat_diab_ctrl) <- "RNA_css_snn_res.0.35"
+cl8 <- subset(seurat_diab_ctrl, idents = c(8))
+
+# Run wilcoxon test
+DE_wilcoxauc_cl8 <- wilcoxauc(cl8, group_by = "condition") %>%
+  filter(group == "Diabetic") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_cl8 <- DE_wilcoxauc_cl8 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_cl8) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_cl8$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_cl1 <- setdiff(DE_wilcoxauc_cl8$feature,blacklist)
+DE_wilcoxauc_cl8 <- DE_wilcoxauc_cl8 %>% filter(feature %in% diff_genes_cl1)
+
+# plot
+pdf("Plots/cl8_volcano_DE_diab_vs_ctrl.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl8, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/cl8_volcano_DE_diab_vs_ctrl_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl8, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl8, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_cl8, "Plots/DE_wilcoxauc_cl8_diab_vs_ctrl.csv")
+
+```
+
+```{r wicoxon test on cluster 6}
+
+Idents(seurat_diab_ctrl) <- "RNA_css_snn_res.0.35"
+cl6 <- subset(seurat_diab_ctrl, idents = c(6))
+
+# Run wilcoxon test
+DE_wilcoxauc_cl6 <- wilcoxauc(cl6, group_by = "condition") %>%
+  filter(group == "Diabetic") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_cl6 <- DE_wilcoxauc_cl6 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_cl6) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_cl6$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes_cl6 <- setdiff(DE_wilcoxauc_cl6$feature,blacklist)
+DE_wilcoxauc_cl6 <- DE_wilcoxauc_cl6 %>% filter(feature %in% diff_genes_cl6)
+
+# plot
+pdf("Plots/cl6_volcano_DE_diab_vs_ctrl.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl6, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl6, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl6, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  geom_text_repel(max.overlaps = 50) +
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+pdf("Plots/cl6_volcano_DE_diab_vs_ctrl_no_label.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_cl6, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(colour = "grey", fill= "gray", alpha = 0.5, size = 1) +
+  geom_point(data =  filter(DE_wilcoxauc_cl6, outcome == "Up-regulated" & logFC > log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black") +
+  geom_point(data =  filter(DE_wilcoxauc_cl6, outcome == "Down-regulated" & logFC < -log(1.1)), size = 1.5,shape = 21,fill = "black",colour = "black")+
+  theme_classic() + 
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+write.csv(DE_wilcoxauc_cl6, "Plots/DE_wilcoxauc_cl6_diab_vs_ctrl.csv")
+
+```
+
+## Enrichment analysis of DEGs
+
+```{r GO of all clusters}
+
+# Exclude cluster 11 as it has no DEGs
+seurat_de_tab <- seurat_de_tab[-7] 
+
+# Add ENTREZID to each dataframe for each gene
+seurat_de_tab_entr <- lapply(seurat_de_tab, function (cl){
+  seurat_de_tab_entr <- cl %>% filter(outcome != "Unchanged")
+  seurat_de_tab_entr$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=seurat_de_tab_entr$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+  return(seurat_de_tab_entr)
+})
+
+
+## UP
+# Extract a list of gene names of upregulated genes in each cluster
+seurat_de_tab_up <- lapply(seurat_de_tab_entr, function (cl){
+  seurat_de_tab_up <- cl %>% filter(outcome == "Up-regulated")
+  seurat_de_tab_up <- seurat_de_tab_up$entrez_id
+  return(seurat_de_tab_up)
+})
+
+ck <- compareCluster(geneCluster = seurat_de_tab_up, fun='enrichGO', OrgDb='org.Hs.eg.db', ont = "CC", readable = TRUE)
+head(ck) 
+
+pdf("Plots/GO_CC_enrichment_res_all.pdf", width = 8, height = 8)
+enrichplot::dotplot(ck, showCategory = 6) +  
+  ggtitle('GO CC enrichment based on DE genes between diabetic and control') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+write.csv(ck@compareClusterResult, "Plots/GO_CC_enrich_all_clusters.csv")
+
+
+mf <- compareCluster(geneCluster = seurat_de_tab_up, fun='enrichGO', OrgDb='org.Hs.eg.db', ont = "MF", readable = TRUE)
+head(mf) 
+
+pdf("Plots/GO_MF_enrichment_res_all.pdf", width = 7, height = 7)
+enrichplot::dotplot(mf, showCategory = 6) +  
+  ggtitle('GO MF enrichment based on DE genes between diabetic and control') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+write.csv(mf@compareClusterResult, "Plots/GO_MF_enrich_all_clusters.csv")
+
+
+bp <- compareCluster(geneCluster = seurat_de_tab_up, fun='enrichGO', OrgDb='org.Hs.eg.db', ont = "BP", readable = TRUE)
+head(mf) 
+
+pdf("Plots/GO_BP_enrichment_res_all.pdf", width = 8, height = 8)
+enrichplot::dotplot(bp, showCategory = 6) +  
+  ggtitle('GO BP enrichment based on DE genes between diabetic and control') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+write.csv(bp@compareClusterResult, "Plots/GO_BP_enrich_all_clusters.csv")
+
+```
+
+
+```{r KEGG of all clusters}
+
+# Exclude cluster 11 as it has no DEGs
+seurat_de_tab <- seurat_de_tab[-7] 
+
+# Add ENTREZID to each dataframe for each gene
+seurat_de_tab_entr <- lapply(seurat_de_tab, function (cl){
+  seurat_de_tab_entr <- cl %>% filter(outcome != "Unchanged")
+  seurat_de_tab_entr$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=seurat_de_tab_entr$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+  return(seurat_de_tab_entr)
+})
+
+# Extract a list of gene names of upregulated genes in each cluster
+seurat_de_tab_up <- lapply(seurat_de_tab_entr, function (cl){
+  seurat_de_tab_up <- cl %>% filter(outcome == "Up-regulated")
+  seurat_de_tab_up <- seurat_de_tab_up$entrez_id
+  return(seurat_de_tab_up)
+})
+
+ck <- compareCluster(geneCluster = seurat_de_tab_up, fun = enrichKEGG,)
+ck <- setReadable(ck, OrgDb = org.Hs.eg.db, keyType="ENTREZID")
+head(ck) 
+
+pdf("Plots/KEGG_enrichment_res_all.pdf", width = 6, height = 6)
+enrichplot::dotplot(ck, showCategory = 6) +  
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(ck@compareClusterResult, "Plots/KEGG_path_enrich_all_clusters.csv")
+
+```
+
+```{r KEGG of clusters 1 6 8}
+
+# Cluster 1
+DE_wilcoxauc_cl1_pos <- DE_wilcoxauc_cl1 %>% filter(outcome != "Unchanged")
+DE_wilcoxauc_cl1_pos$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=DE_wilcoxauc_cl1_pos$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+fm_path_enrich_cl1 <- compareCluster(entrez_id~outcome, data=DE_wilcoxauc_cl1_pos, fun = enrichKEGG, organism="hsa")
+pdf("Plots/KEGG_enrichment_res_cl1.pdf", width = 4, height = 5)
+enrichplot::dotplot(fm_path_enrich_cl1, showCategory = 6) +
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(fm_path_enrich_cl1@compareClusterResult, "Plots/KEGG_path_enrich_cl1.csv")
+
+
+
+# Cluster 6
+DE_wilcoxauc_cl6_pos <- DE_wilcoxauc_cl6 %>% filter(outcome != "Unchanged")
+DE_wilcoxauc_cl6_pos$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=DE_wilcoxauc_cl6_pos$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+fm_path_enrich_cl6 <- compareCluster(entrez_id~outcome, data=DE_wilcoxauc_cl6_pos, fun = enrichKEGG, organism="hsa")
+pdf("Plots/KEGG_enrichment_res_cl6.pdf", width = 4, height = 5)
+enrichplot::dotplot(fm_path_enrich_cl6, showCategory = 6) +
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(fm_path_enrich_cl6@compareClusterResult, "Plots/KEGG_path_enrich_cl6.csv")
+
+
+
+# Cluster 8
+DE_wilcoxauc_cl8_pos <- DE_wilcoxauc_cl8 %>% filter(outcome != "Unchanged")
+DE_wilcoxauc_cl8_pos$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=DE_wilcoxauc_cl8_pos$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+fm_path_enrich_cl8 <- compareCluster(entrez_id~outcome, data=DE_wilcoxauc_cl8_pos, fun = enrichKEGG, organism="hsa")
+pdf("Plots/KEGG_enrichment_res_cl8.pdf", width = 4, height = 5)
+enrichplot::dotplot(fm_path_enrich_cl8, showCategory = 6) +
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(fm_path_enrich_cl8@compareClusterResult, "Plots/KEGG_path_enrich_cl8.csv")
+
+```
+
+## Pseudobulk DE with DESeq2
+#### Generate pseudobulk samples
+```{r genearte a SingleCellExperiment object}
+
+library(tidyverse)
+library(cowplot)
+library(Matrix.utils)
+library(edgeR)
+library(Matrix)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(pheatmap)
+library(apeglm)
+library(png)
+library(DESeq2)
+library(RColorBrewer)
+library(data.table)
+
+# Generate a new metadata column with condition_replicate
+seurat$sample <- seurat$orig.ident
+seurat$sample <- gsub(c("Control_1"), "Control1", seurat$sample)
+seurat$sample <- gsub(c("Control_2"), "Control2", seurat$sample)
+seurat$sample <- gsub(c("Inflammatory_1"), "Inflammatory1", seurat$sample)
+seurat$sample <- gsub(c("Inflammatory_2"), "Inflammatory2", seurat$sample)
+seurat$sample <- gsub(c("Inflammatory_3"), "Inflammatory3", seurat$sample)
+seurat$sample <- gsub(c("Diabetic_1"), "Diabetic1", seurat$sample)
+seurat$sample <- gsub(c("Diabetic_2"), "Diabetic2", seurat$sample)
+seurat$sample <- gsub(c("Diabetic_3"), "Diabetic3", seurat$sample)
+
+# Generate a new metadata column with batch
+seurat$batch <- seurat$orig.ident
+seurat$batch <- gsub(c("Control_1"), "1", seurat$batch)
+seurat$batch <- gsub(c("Control_2"), "2", seurat$batch)
+seurat$batch <- gsub(c("Inflammatory_1"), "1", seurat$batch)
+seurat$batch <- gsub(c("Inflammatory_2"), "2", seurat$batch)
+seurat$batch <- gsub(c("Inflammatory_3"), "2", seurat$batch)
+seurat$batch <- gsub(c("Diabetic_1"), "1", seurat$batch)
+seurat$batch <- gsub(c("Diabetic_2"), "2", seurat$batch)
+seurat$batch <- gsub(c("Diabetic_3"), "2", seurat$batch)
+
+# Subset mural and endtohelial
+Idents(seurat) <- "RNA_css_snn_res.0.35"
+mural <- subset(seurat, idents = c(6,4,11,3,7,0,1,2))
+ec <- subset(seurat, idents = c(8,9,10,5))
+
+```
+
+Generate a SingleCellExperiment object from the merged seurat objects
+```{r genearte a SingleCellExperiment object}
+
+# Extract raw counts and metadata to create SingleCellExperiment object
+counts_mural <- mural@assays$RNA@counts 
+counts_ec <- ec@assays$RNA@counts 
+
+metadata_mural <- mural@meta.data
+metadata_ec <- ec@meta.data
+
+# Set up metadata as desired for aggregation and DE analysis
+metadata_mural$cluster_id <- factor(mural@active.ident)
+metadata_ec$cluster_id <- factor(ec@active.ident)
+
+# Create single cell experiment object
+sce_mural <- SingleCellExperiment(assays = list(counts = counts_mural), 
+                           colData = metadata_mural)
+sce_ec <- SingleCellExperiment(assays = list(counts = counts_ec), 
+                           colData = metadata_ec)
+
+```
+
+Take a look at the count matrix
+```{r count matrix and metadata}
+
+# Explore the raw counts for the dataset
+## Check the assays present
+assays(sce_mural)
+assays(sce_ec)
+
+## Check the counts matrix
+dim(counts(sce_mural))
+counts(sce_mural)[1:6, 1:6]
+dim(counts(sce_ec))
+counts(sce_ec)[1:6, 1:6]
+
+# Explore the cellular metadata for the dataset
+dim(colData(sce_mural))
+head(colData(sce_mural))
+dim(colData(sce_ec))
+head(colData(sce_ec))
+
+```
+
+```{r extract necessary metrics}
+
+# Subset metadata to include only the variables you want to aggregate across (here, we want to aggregate by sample and by cluster)
+groups_mural <- colData(sce_mural)[, c("sample")]
+head(groups_mural)
+
+groups_ec <- colData(sce_ec)[, c("sample")]
+head(groups_ec)
+
+```
+
+#### Aggregate matrix
+Aggregate the counts to generate a matrix with count sums
+```{r generate an aggregated matrix of counts per sample}
+
+# Aggregate across cluster-sample groups
+# transposing row/columns to have cell_ids as row names matching those of groups
+aggr_counts_mural <- aggregate.Matrix(t(counts(sce_mural)), 
+                                groupings = groups_mural, fun = "sum") 
+aggr_counts_ec <- aggregate.Matrix(t(counts(sce_ec)), 
+                                groupings = groups_ec, fun = "sum") 
+
+# Explore output matrix
+class(aggr_counts_mural)
+dim(aggr_counts_mural)
+aggr_counts_mural[1:3, 1:6]
+class(aggr_counts_ec)
+dim(aggr_counts_ec)
+aggr_counts_ec[1:3, 1:6]
+
+# Now transpose the matrix back so we can easilty use it to do DE analysis
+# Transpose aggregated matrix to have genes as rows and samples as columns
+aggr_counts_mural <- t(aggr_counts_mural)
+aggr_counts_mural[1:6, 1:3]
+aggr_counts_ec <- t(aggr_counts_ec)
+aggr_counts_ec[1:6, 1:3]
+
+```
+
+Generate matching metadata at the sample-level
+```{r}
+
+# Explore structure of metadata
+head(colData(sce_mural))
+head(colData(sce_ec))
+
+# Extract sample-level variables
+metadata_mural <- colData(sce_mural) %>% 
+  as.data.frame() %>% 
+  dplyr::select(condition, batch, sample)
+
+dim(metadata_mural)
+head(metadata_mural)
+
+metadata_ec <- colData(sce_ec) %>% 
+  as.data.frame() %>% 
+  dplyr::select(condition, batch, sample)
+
+dim(metadata_ec)
+head(metadata_ec)
+
+
+# Exclude duplicated rows
+metadata_mural <- metadata_mural[!duplicated(metadata_mural), ]
+
+dim(metadata_mural)
+head(metadata_mural)
+
+metadata_ec <- metadata_ec[!duplicated(metadata_ec), ]
+
+dim(metadata_ec)
+head(metadata_ec)
+
+
+# Rename rows
+rownames(metadata_mural) <- metadata_mural$sample
+head(metadata_mural)
+
+rownames(metadata_ec) <- metadata_ec$sample
+head(metadata_ec)
+
+# Check the number of cells per sample
+t_mural <- table(colData(sce_mural)$condition)
+t_mural
+type(t_mural)
+aggr_counts_mural[1:6, 1:3]
+head(metadata_mural)
+
+t_ec <- table(colData(sce_ec)$condition)
+t_ec
+type(t_ec)
+aggr_counts_ec[1:6, 1:3]
+head(metadata_ec)
+
+# Check matching of matrix columns and metadata rows
+all(colnames(aggr_counts_mural) == rownames(metadata_mural)) 
+all(colnames(aggr_counts_ec) == rownames(metadata_ec)) 
+
+# They do not, so we make them match
+metadata_mural <- metadata_mural[match(colnames(aggr_counts_mural), rownames(metadata_mural)), ]
+metadata_ec <- metadata_ec[match(colnames(aggr_counts_ec), rownames(metadata_ec)), ]
+
+```
+
+#### Differential expression with DESeq2
+
+```{r DESeq2 design formula}
+
+# Create DESeq2 object        
+dds_mural <- DESeqDataSetFromMatrix(aggr_counts_mural, 
+                              colData = metadata_mural, 
+                              design = ~ batch + condition)
+
+dds_ec <- DESeqDataSetFromMatrix(aggr_counts_ec, 
+                              colData = metadata_ec, 
+                              design = ~ batch + condition)
+
+```
+
+```{r run DESeq2}
+
+# Run DESeq2 differential expression analysis
+# dds <- DESeq(dds, useT=TRUE, minmu=1e-6, minReplicatesForReplace =Inf,  test = "LRT", reduced = ~ 1)
+dds_mural <- DESeq(dds_mural)
+dds_ec <- DESeq(dds_ec)
+
+# Plot dispersion estimates
+plotDispEsts(dds_mural)
+plotDispEsts(dds_ec)
+
+```
+
+```{r get results}
+
+# Mural cells
+#/ standard workflow
+dds_mural <- estimateSizeFactors(dds_mural)
+dds_mural <- estimateDispersions(dds_mural)
+dds_mural <- nbinomWaldTest(dds_mural)
+resultsNames(dds_mural) # lists the coefficients
+res_mural <- lfcShrink(dds = dds_mural, coef = "condition_Diabetic_vs_Control" , type = "apeglm")
+
+# order results table by the smallest adjusted p value:
+res_mural <- res_mural[order(res_mural$padj),]
+results_mural <- as.data.frame(dplyr::mutate(as.data.frame(res_mural), sig=ifelse(res_mural$padj<0.05, "FDR<0.05", "Not Sig")), row.names=rownames(res_mural))
+head(results_mural)
+results_mural[order(-results_mural$log2FoldChange),]
+write.csv(results_mural, "Plots/DESeq2_results_mural.csv")
+
+DEgenes_DESeq <- results_mural[which(abs(results_mural$log2FoldChange) > log2(1.1) & results_mural$padj < 0.05),]
+p = ggplot2::ggplot(results_mural, ggplot2::aes(log2FoldChange, -log10(pvalue))) +
+  ggplot2::geom_point(ggplot2::aes(col = sig)) +
+  ggplot2::scale_color_manual(values = c("red", "black")) +
+  ggplot2::ggtitle("Volcano Plot of DESeq2 analysis")
+p + ggrepel::geom_text_repel(data=results_mural[1:20, ], ggplot2::aes(label=rownames(results_mural[1:20, ])))
+
+
+
+# Endothelial cells
+#/ standard workflow
+dds_ec <- estimateSizeFactors(dds_ec)
+dds_ec <- estimateDispersions(dds_ec)
+dds_ec <- nbinomWaldTest(dds_ec)
+resultsNames(dds_ec) # lists the coefficients
+res_ec <- lfcShrink(dds = dds_ec, coef = "condition_Diabetic_vs_Control" , type = "apeglm")
+
+# order results table by the smallest adjusted p value:
+res_ec <- res_ec[order(res_ec$padj),]
+results_ec <- as.data.frame(dplyr::mutate(as.data.frame(res_ec), sig=ifelse(res_ec$padj<0.05, "FDR<0.05", "Not Sig")), row.names=rownames(res_ec))
+head(results_ec)
+results_ec[order(-results_ec$log2FoldChange),]
+write.csv(results_ec, "Plots/DESeq2_results_ec.csv")
+
+DEgenes_DESeq <- results_ec[which(abs(results_ec$log2FoldChange) > log2(1.1) & results_ec$padj < 0.05),]
+p = ggplot2::ggplot(results_ec, ggplot2::aes(log2FoldChange, -log10(pvalue))) +
+  ggplot2::geom_point(ggplot2::aes(col = sig)) +
+  ggplot2::scale_color_manual(values = c("red", "black")) +
+  ggplot2::ggtitle("Volcano Plot of DESeq2 analysis")
+p + ggrepel::geom_text_repel(data=results_ec[1:20, ], ggplot2::aes(label=rownames(results_ec[1:20, ])))
+
+```
+
+```{r run vst normaliztion}
+
+library(apeglm)
+# Check the coefficients for the comparison
+resultsNames(dds_mural)
+
+vsd_mural <- vst(dds_mural)
+plotPCA(vsd_mural, intgroup = "condition") 
+
+assay(vsd_mural) <- limma::removeBatchEffect(assay(vsd_mural), batch = vsd_mural$batch)
+plotPCA(dds_mural, "batch")
+plotPCA(vsd_mural, intgroup = "condition") 
+
+```
+
+```{r}
+
+
+# Output results of Wald test for contrast for stim vs ctrl
+levels(dds_mural$condition)[3]
+levels(dds_mural$condition)[1]
+
+contrast_mural <- c("condition", levels(metadata_mural$condition)[3], levels(metadata_mural$condition)[1])
+
+# resultsNames(dds)
+res_mural <- results(dds_mural, 
+               contrast = contrast_mural,
+               alpha = 0.05)
+
+res_mural <- lfcShrink(dds_mural, 
+                 contrast =  contrast_mural,
+                 res=res_mural, type = "apeglm")
+
+```
+
+# Save the object
+```{r save seurat object}
+
+saveRDS(seurat, "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/Diabetes/Objects/diabetes_css_integrated_seurat.rds")
+
+```
+
+
+```{r SCpubr analysis of single conditions}
+
+library(SCpubr)
+table(diabetes$major_ct)
+table(diabetes$condition)
+table(diabetes$ct_condition) <- paste0(diabetes$major_ct, "_", diabetes$condition)
+Idents(diabetes) <- "condition"
+
+# susbet cells from each sample
+ctrl <- subset(diabetes, idents = c("Control") )
+diab <- subset(diabetes, idents = c("Diabetic") )
+infl <- subset(diabetes, idents = c("Inflammatory") )
+
+Idents(ctrl) <- "major_ct"
+Idents(diab) <- "major_ct"
+Idents(infl) <- "major_ct"
+
+cells <- list(ctrl, diab, infl)
+
+liana_output <- lapply(cells, function(rl_int_cells){
+  output <- liana::liana_wrap(sce = rl_int_cells,
+                                  method = c("natmi", "connectome", "logfc", "sca", "cellphonedb"),
+                                  idents_col = NULL,
+                                  verbose = FALSE,
+                                  assay = "RNA")
+  return(output)
+})
+
+# Chord diagram of the total significant interactions from each cluster and all the rest.
+out <- lapply(liana_output, function(output){
+  plot <- SCpubr::do_LigandReceptorPlot(liana_output = output,
+                                     top_interactions = 15,
+                                     keep_source = c("Mural"),
+                                     keep_target = c("Endothelial"),
+                                     compute_ChordDiagrams = TRUE)
+  return(plot)
+})
+
+pdf("Plots/Seurat_objects_integrated/liana_output.pdf", width = 8, height = 8)
+out
+dev.off()
+
+```
+```{r nichenet}
+
+### Load Packages
+library(nichenetr)
+library(Seurat) # please update to Seurat V4
+library(tidyverse)
+
+```
+
+```{r}
+
+ligand_target_matrix <- readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+ligand_target_matrix[1:5,1:5] # target genes in rows, ligands in columns
+lr_network <- readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+lr_network <- lr_network %>% mutate(bonafide = ! database %in% c("ppi_prediction","ppi_prediction_go"))
+# lr_network <- lr_network %>% dplyr::rename(ligand = from, receptor = to) %>% distinct(ligand, receptor, bonafide)
+head(lr_network)
+
+weighted_networks <- readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+head(weighted_networks$lr_sig) # interactions and their weights in the ligand-receptor + signaling network
+head(weighted_networks$gr) # interactions and their weights in the gene regulatory network
+
+```
+
+```{r}
+
+Idents(seurat) <- "major_ct"
+# 1. Define a “sender/niche” cell population and a “receiver/target” cell population present in your expression data and determine which genes are expressed in both populations
+## receiver
+receiver = "Endothelial"
+expressed_genes_receiver = get_expressed_genes(receiver, seurat, pct = 0.10)
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+
+## sender
+sender_celltypes = c("Mural")
+
+list_expressed_genes_sender = sender_celltypes %>% unique() %>% lapply(get_expressed_genes, seurat, 0.10) # lapply to get the expressed genes of every sender cell type separately here
+expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+
+# 2. Define a gene set of interest: these are the genes in the “receiver/target” cell population that are potentially affected by ligands expressed by interacting cells (e.g. genes differentially expressed upon cell-cell interaction)
+
+nichenet_output <- nichenet_seuratobj_aggregate(
+  seurat_obj = seurat, 
+  receiver = "Endothelial", 
+  condition_colname = "condition", condition_oi = c("Diabetic"), condition_reference = "Control", 
+  sender = c("Mural"), 
+  ligand_target_matrix = ligand_target_matrix, lr_network = lr_network, weighted_networks = weighted_networks, organism = "human")
+
+
+seurat_obj_receiver= subset(seurat, idents = receiver)
+seurat_obj_receiver = SetIdent(seurat_obj_receiver, value = seurat_obj_receiver[["aggregate"]])
+
+condition_oi = "Diabetic"
+condition_reference = "Control" 
+  
+DE_table_receiver = FindMarkers(object = seurat_obj_receiver, ident.1 = condition_oi, ident.2 = condition_reference, min.pct = 0.10) %>% rownames_to_column("gene")
+
+geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+
+# 3. Define a set of potential ligands
+ligands = lr_network %>% pull(from) %>% unique()
+receptors = lr_network %>% pull(to) %>% unique()
+
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+
+# 4. Perform NicheNet ligand activity analysis
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+
+ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+ligand_activities
+
+```
+
+```{r}
+
+# Default weights
+prioritizing_weights = c("de_ligand" = 1,
+                          "de_receptor" = 1,
+                          "activity_scaled" = 2,
+                          "exprs_ligand" = 1,
+                          "exprs_receptor" = 1,
+                         "ligand_condition_specificity" = 0.5,
+                         "receptor_condition_specificity" = 0.5)
+
+```
+
+```{r}
+
+celltypes <- unique(seurat$major_ct)
+lr_network_renamed <- lr_network %>% rename(ligand=from, receptor=to)
+
+# Only calculate DE for LCMV condition, with genes that are in the ligand-receptor network
+DE_table <- calculate_de(seurat, celltype_colname = "celltype",
+                         condition_colname = "aggregate", condition_oi = condition_oi,
+                         features = union(expressed_ligands, expressed_receptors))
+
+# Average expression information - only for LCMV condition
+expression_info <- get_exprs_avg(seurat, "celltype", condition_colname = "aggregate", condition_oi = condition_oi)
+
+# Calculate condition specificity - only for datasets with two conditions!
+condition_markers <- FindMarkers(object = seurat, ident.1 = condition_oi, ident.2 = condition_reference,
+                                 group.by = "aggregate", min.pct = 0, logfc.threshold = 0,
+                                 features = union(expressed_ligands, expressed_receptors)) %>% rownames_to_column("gene")
+
+# Combine DE of senders and receivers -> used for prioritization
+processed_DE_table <- process_table_to_ic(DE_table, table_type = "celltype_DE", lr_network_renamed,
+                                         senders_oi = sender_celltypes, receivers_oi = receiver)
+  
+processed_expr_table <- process_table_to_ic(expression_info, table_type = "expression", lr_network_renamed)
+
+processed_condition_markers <- process_table_to_ic(condition_markers, table_type = "group_DE", lr_network_renamed)
+
+```
+
+```{r}
+prior_table <- generate_prioritization_tables(processed_expr_table,
+                               processed_DE_table,
+                               ligand_activities,
+                               processed_condition_markers,
+                               prioritizing_weights)
+
+prior_table 
+
+prior_table %>% select(c('sender', 'receiver', 'ligand', 'receptor', 'scaled_lfc_ligand', 'scaled_lfc_receptor', 'scaled_p_val_ligand_adapted', 'scaled_p_val_receptor_adapted', 'scaled_avg_exprs_ligand', 'scaled_avg_exprs_receptor', 'scaled_lfc_ligand_group', 'scaled_lfc_receptor_group', 'scaled_activity'))
+
+```
+
+```{r}
+
+```
+
